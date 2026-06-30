@@ -24,3 +24,7 @@ studio-release.zip
 studio-web.zip
 # research harness — multi-GB datasets + model weights, not for git
 research/
+
+# YourMT3+ optional transcriber: isolated install (code+venv+561MB ckpt) and its outputs
+tab-studio/server/yourmt3/
+tab-studio/server/model_output/

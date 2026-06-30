@@ -44,3 +44,11 @@ scipy>=1.11              # band-pass filter for the librosa drum fallback
 # multi-band onset detection if not installed.
 # madmom>=0.16.1
 # ADTLib
+
+# YourMT3+ — DEFAULT melodic transcriber when installed (multi-instrument; validated
+# 10-16x better than basic-pitch on synths). NOT installed via this file: it is GPL-3.0
+# and pulls a heavy lightning/transformers stack + a 561 MB checkpoint, so it lives in
+# its own isolated venv and runs out-of-process. Set it up once with:
+#   python tab-studio/server/setup_yourmt3.py
+# The app auto-detects it (STUDIO_YOURMT3_DIR) and falls back to basic-pitch otherwise.
+# See YOURMT3.md.

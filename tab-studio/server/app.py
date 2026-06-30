@@ -3,7 +3,10 @@ Bass Studio backend — FastAPI.
 
 Runs SOTA models locally and serves the static editor from one origin:
   * Demucs v4          — isolate instrument stems from a full song.
-  * Spotify basic-pitch — transcribe (bass/piano) audio to MIDI.
+  * YourMT3+ (default)  — multi-instrument transcription (synths/bass/guitar/keys);
+                          validated 10-16x better than basic-pitch on synths. Optional,
+                          out-of-process; see setup_yourmt3.py. Falls back to basic-pitch.
+  * Spotify basic-pitch — transcription fallback when YourMT3 is not installed.
   * ADTOF (neural) / librosa — drum transcription → drums.json + drums.mid.
 
 Endpoints (all under /api):
@@ -12,9 +15,12 @@ Endpoints (all under /api):
         fields: file, pipeline, stem, model, min_freq, max_freq, min_note_len,
                 onset_threshold, frame_threshold, shifts
         pipeline values:
-          song-to-midi  (=song-to-bass)  — Demucs bass + basic-pitch
+          song-to-midi  (=song-to-bass)  — YourMT3+ on the full song, extract `stem`
+                                            (falls back to Demucs `stem` + basic-pitch)
+          song-to-multitrack              — YourMT3+ on the full song → bass/guitar/piano/
+                                            keys MIDIs at once + ADTOF drums
           separate                        — Demucs only
-          transcribe                      — basic-pitch only
+          transcribe                      — YourMT3+ (or basic-pitch) on the given audio
           song-to-drums                   — Demucs drums + ADTOF
           drum-transcribe                 — ADTOF only (input = drum stem/audio)
   GET  /api/jobs/{id}                       -> {status, stage, progress, elapsed, error, artifacts}
@@ -45,6 +51,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
+
+import yourmt3_backend  # YourMT3+ default melodic transcriber (subprocess; basic-pitch fallback)
 
 HERE = Path(__file__).resolve().parent
 WEB_DIR = (HERE.parent / "web").resolve()
@@ -278,13 +286,31 @@ def run_separate(job, in_path, stem, model, shifts="2"):
     return dst
 
 
-def run_transcribe(job, audio_path, min_freq, max_freq, min_note_len, onset="", frame=""):
-    """Spotify basic-pitch -> notes.mid.
+def run_transcribe(job, audio_path, min_freq, max_freq, min_note_len, onset="", frame="", instrument=None):
+    """Transcribe audio -> notes.mid.
 
-    Lower onset_threshold / frame_threshold = more (and softer) notes detected —
-    useful for polyphonic piano, at the cost of a few more spurious notes to clean
-    up in the editor.
+    Default engine is YourMT3+ (multi-instrument SOTA; validated 10-16x better than
+    basic-pitch on synths — research/synth-voice-separation/RESULTS.md). It is run on
+    the given audio and filtered to `instrument` by GM program. If YourMT3 is not
+    installed (or STUDIO_TRANSCRIBER=basicpitch), we fall back to Spotify basic-pitch.
+
+    basic-pitch: lower onset_threshold / frame_threshold = more (and softer) notes —
+    useful for polyphonic piano, at the cost of a few more spurious notes to clean up.
     """
+    mid = Path(job["dir"]) / "notes.mid"
+    if yourmt3_backend.available():
+        try:
+            _set(job, status="running", stage="transcribing to MIDI (YourMT3+)…", progress=0.05)
+            raw = Path(job["dir"]) / "yourmt3_raw.mid"
+            yourmt3_backend.transcribe(audio_path, raw)
+            yourmt3_backend.extract_instrument(
+                raw, mid, instrument, int(float(min_note_len)) if min_note_len else 60)
+            arts = job["artifacts"] + ["notes.mid"]
+            _set(job, artifacts=list(dict.fromkeys(arts)), progress=1.0)
+            return mid
+        except Exception as e:  # noqa: BLE001 — degrade gracefully to basic-pitch
+            _set(job, stage="YourMT3 unavailable (%s); using basic-pitch…" % str(e)[:120])
+
     _set(job, status="running", stage="transcribing to MIDI (basic-pitch)…", progress=0.0)
     from basic_pitch.inference import predict
     from basic_pitch import ICASSP_2022_MODEL_PATH
@@ -449,20 +475,55 @@ def yt_worker(job, url):
         _set(job, status="error", stage="error", error=str(e))
 
 
+def run_multitrack(job, in_path, model="htdemucs_6s", shifts="2"):
+    """YourMT3+ on the full song -> a combined multi-instrument MIDI plus per-instrument
+    melodic MIDIs (bass / guitar / piano / keys-and-synths), plus ADTOF drums from the
+    Demucs drum stem. One transcription pass yields all the pitched voices as separate
+    tracks — the validated 'On the Fly' workflow, in-app."""
+    if not yourmt3_backend.available():
+        raise RuntimeError("song-to-multitrack needs YourMT3 (run setup_yourmt3.py)")
+    import pretty_midi
+    _set(job, status="running", stage="transcribing all instruments (YourMT3+)…", progress=0.1)
+    raw = Path(job["dir"]) / "yourmt3_multi.mid"
+    yourmt3_backend.transcribe(in_path, raw)
+    arts = job["artifacts"] + ["yourmt3_multi.mid"]
+    for inst_name in ("bass", "guitar", "piano", "keys"):
+        out = Path(job["dir"]) / (inst_name + ".mid")
+        yourmt3_backend.extract_instrument(raw, out, inst_name)
+        if pretty_midi.PrettyMIDI(str(out)).instruments[0].notes:
+            arts.append(inst_name + ".mid")
+        else:
+            out.unlink(missing_ok=True)
+    _set(job, artifacts=list(dict.fromkeys(arts)), progress=0.7)
+    try:  # drums via ADTOF on the isolated drum stem (best drum method)
+        drum_audio = run_separate(job, in_path, "drums", model, shifts)
+        run_drum_transcribe(job, drum_audio)
+    except Exception as e:  # noqa: BLE001 — drums are best-effort here
+        _set(job, stage="drums skipped (%s)" % str(e)[:80])
+    _set(job, progress=1.0)
+
+
 def worker(job, in_path, pipeline, stem, model, min_freq, max_freq, min_note_len, onset, frame, shifts):
     try:
         if pipeline == "separate":
             run_separate(job, in_path, stem, model, shifts)
         elif pipeline == "transcribe":
-            run_transcribe(job, in_path, min_freq, max_freq, min_note_len, onset, frame)
+            run_transcribe(job, in_path, min_freq, max_freq, min_note_len, onset, frame, instrument=stem)
         elif pipeline == "drum-transcribe":
             run_drum_transcribe(job, in_path)
         elif pipeline == "song-to-drums":
             audio = run_separate(job, in_path, "drums", model, shifts)
             run_drum_transcribe(job, audio)
+        elif pipeline == "song-to-multitrack":
+            run_multitrack(job, in_path, model, shifts)
         else:  # song-to-midi (song-to-bass kept as an alias)
-            audio = run_separate(job, in_path, stem, model, shifts)
-            run_transcribe(job, audio, min_freq, max_freq, min_note_len, onset, frame)
+            if yourmt3_backend.available():
+                # YourMT3 is strongest on the full mix — transcribe the song directly and
+                # pull out the requested instrument (no per-stem Demucs needed).
+                run_transcribe(job, in_path, min_freq, max_freq, min_note_len, onset, frame, instrument=stem)
+            else:
+                audio = run_separate(job, in_path, stem, model, shifts)
+                run_transcribe(job, audio, min_freq, max_freq, min_note_len, onset, frame)
         _set(job, status="done", stage="done", progress=1.0)
     except Exception as e:  # noqa: BLE001 — report any failure to the UI
         _set(job, status="error", stage="error", error=str(e))
@@ -473,12 +534,15 @@ def worker(job, in_path, pipeline, stem, model, min_freq, max_freq, min_note_len
 # -----------------------------------------------------------------------------
 @app.get("/api/health")
 def health():
+    ymt3 = yourmt3_backend.available()
     return {
         "ok": True,
         "demucs": _have("demucs"),
         "basic_pitch": _have("basic_pitch"),
         "adtof": _have("adtof_pytorch"),
         "yt_dlp": _have("yt_dlp"),
+        "yourmt3": ymt3,
+        "transcriber": "yourmt3" if ymt3 else "basic-pitch",
         "device": _device(),
     }
 
@@ -510,15 +574,22 @@ async def create_job(
     shifts: str = Form("2"),
 ):
     DRUM_PIPELINES = {"song-to-drums", "drum-transcribe"}
-    VALID_PIPELINES = {"song-to-midi", "song-to-bass", "separate", "transcribe"} | DRUM_PIPELINES
+    VALID_PIPELINES = {"song-to-midi", "song-to-bass", "separate", "transcribe",
+                       "song-to-multitrack"} | DRUM_PIPELINES
     if pipeline not in VALID_PIPELINES:
         raise HTTPException(400, "unknown pipeline")
     if stem not in ALLOWED_STEMS:
         raise HTTPException(400, "unknown stem '%s'" % stem)
     if model not in ALLOWED_MODELS:
         raise HTTPException(400, "unknown model '%s'" % model)
-    needs_demucs = pipeline in ("song-to-midi", "song-to-bass", "separate", "song-to-drums")
-    needs_bp = pipeline in ("song-to-midi", "song-to-bass", "transcribe")
+    ymt3 = yourmt3_backend.available()
+    # YourMT3 transcribes the full song directly, so the melodic paths only fall back to
+    # Demucs + basic-pitch when YourMT3 is unavailable.
+    needs_demucs = pipeline in ("separate", "song-to-drums") or (
+        pipeline in ("song-to-midi", "song-to-bass") and not ymt3)
+    needs_bp = pipeline in ("song-to-midi", "song-to-bass", "transcribe") and not ymt3
+    if pipeline == "song-to-multitrack" and not ymt3:
+        raise HTTPException(503, "song-to-multitrack requires YourMT3 (run setup_yourmt3.py).")
     if needs_demucs and not _have("demucs"):
         raise HTTPException(503, "Demucs is not installed (pip install -r requirements.txt).")
     if needs_bp and not _have("basic_pitch"):
