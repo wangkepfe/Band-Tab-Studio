@@ -18,7 +18,10 @@ var EditorPlayer = (function () {
   var sched = [], durationSec = 0;
   var playing = false, posSec = 0, clockBase = 0, startCtx = 0, audioStart = 0, raf = 0;
   var metro = false;
-  var ppq = 480, tempo = 120, tsNum = 4;
+  // `timelineTempo` maps ticks to real seconds (the tempo the notes were written at,
+  // so playback stays locked to the song); `tempo` is the musical tempo the user set —
+  // it only spaces the metronome, which follows the editor's bar grid.
+  var ppq = 480, tempo = 120, timelineTempo = 120, gridOffsetTicks = 0, tsNum = 4;
   var cfg = { getProject: null, setPlayhead: null, onState: null };
   var instrument = 'bass';                                   // 'bass' | 'piano' — voice timbre
 
@@ -74,6 +77,13 @@ var EditorPlayer = (function () {
     o1.start(at); o2.start(at); o1.stop(off); o2.stop(off);
     sources.push(o1, o2);
   }
+  // One-shot audition of a single note (drawing in the editor) — same voice as
+  // playback, so what you hear is what the transcription will sound like.
+  function previewNote(pitch, vel, dur) {
+    var c = ensureCtx(); if (!c) return;
+    if (c.state === 'suspended') c.resume();
+    voice(pitch, c.currentTime + 0.01, Math.max(0.12, Math.min(1.2, dur || 0.3)), vel || 100);
+  }
   function click(at, accent) {
     var o = ctx.createOscillator(); o.type = 'square'; o.frequency.value = accent ? 2000 : 1300;
     var g = ctx.createGain(), peak = accent ? 0.2 : 0.12, dur = 0.03;
@@ -89,17 +99,17 @@ var EditorPlayer = (function () {
     sources = [];
   }
 
-  /* --- tick <-> seconds (single constant tempo) --- */
-  function secPerTick() { return (60 / tempo) / ppq; }
+  /* --- tick <-> seconds (single constant tempo: the timeline's) --- */
+  function secPerTick() { return (60 / timelineTempo) / ppq; }
   function tickToSec(t) { return t * secPerTick(); }
   function secToTick(s) { return s / secPerTick(); }
-  function beatTicks() { return ppq; }
 
   /* --- (re)build schedule from the current project --- */
   function rebuild() {
     var pj = cfg.getProject ? cfg.getProject() : null;
     if (!pj) return;
     ppq = pj.ppq || 480; tempo = pj.tempo || 120; tsNum = (pj.timeSig && pj.timeSig.num) || 4;
+    timelineTempo = pj.timelineTempo || pj.tempo || 120; gridOffsetTicks = pj.gridOffsetTicks || 0;
     sched = []; durationSec = 0;
     (pj.notes || []).forEach(function (n) {
       var s = tickToSec(n.start), e = tickToSec(n.end);
@@ -122,11 +132,12 @@ var EditorPlayer = (function () {
       if (len < 0.03) return;
       voice(ev.pitch, startAt, len, ev.vel);
     });
-    if (metro && beatTicks() > 0) {
-      var bSec = secPerTick() * beatTicks();
+    if (metro && tempo > 0) {
+      var bSec = 60 / tempo, origin = gridOffsetTicks * secPerTick();   // click on the editor's bar grid
       for (var k = 0, guard = 0; guard < 100000; k++, guard++) {
-        var at = k * bSec;
+        var at = origin + k * bSec;
         if (at > durationSec + 0.001) break;
+        if (at < -0.001) continue;
         if (at > fromSec - 0.001) click(audioStart + (at - fromSec), tsNum > 0 && (k % tsNum === 0));
       }
     }
@@ -176,6 +187,7 @@ var EditorPlayer = (function () {
   return {
     configure: configure, play: play, pause: pause, stop: stop, toggle: toggle,
     seekTick: seekTick, rebuild: rebuild, setMetro: setMetro, setInstrument: setInstrument,
+    previewNote: previewNote,
     isPlaying: function () { return playing; },
     positionTick: function () { return secToTick(currentSec()); },
     durationTick: function () { return secToTick(durationSec); },

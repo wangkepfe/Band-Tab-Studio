@@ -30,12 +30,18 @@ var PianoRoll = (function () {
     var ctx = canvas.getContext('2d');
     var dpr = window.devicePixelRatio || 1;
 
+    // P.timelineTempo anchors the tick axis to real time: the notes were written at
+    // that tempo (the transcription's own), so tick × 60/(timelineTempo × ppq) = the
+    // second it sounds in the song. P.tempo is the MUSICAL tempo the user dials in —
+    // it spaces the bar grid (and the metronome) without ever re-timing a note.
     var P = {                                   // project
-      ppq: 480, tempo: 120, timeSig: { num: 4, den: 4 },
+      ppq: 480, tempo: 120, timelineTempo: 120, timeSig: { num: 4, den: 4 },
       lengthTicks: 480 * 4 * 8, notes: []
     };
     var view = { pxPerQuarter: 64, rowH: 13, scrollX: 0, scrollY: 0 };
-    var grid = { ticks: 480 / 4, snap: true, triplet: false };   // default 1/16
+    // grid.offset slides the bar/beat/sub-division lines in time WITHOUT touching a
+    // single note — the tool for lining bar 1 up with music that starts off-grid.
+    var grid = { ticks: 480 / 4, snap: true, triplet: false, offset: 0 };   // default 1/16
     var sel = new Set();
     var clipboard = [];
     var tool = 'select';                        // 'select' | 'draw'
@@ -62,13 +68,27 @@ var PianoRoll = (function () {
     function yToPitch(y) { return MAX_PITCH - Math.floor((y - RULER_H + view.scrollY) / view.rowH); }
     function beatTicks() { return P.ppq * 4 / (P.timeSig.den || 4); }
     function barTicks() { return beatTicks() * (P.timeSig.num || 4); }
+    // The grid is drawn in timeline ticks, so a musical tempo below the timeline's
+    // stretches it (a 96-BPM bar covers 1.25× the ticks of a 120-BPM one) — that is
+    // how the BPM box re-spaces the bars over notes that never move.
+    function gridScale() { return (P.timelineTempo || P.tempo || 120) / (P.tempo || 120); }
+    function beatT() { return beatTicks() * gridScale(); }
+    function barT() { return barTicks() * gridScale(); }
+    // The division is read as a fraction OF THE BEAT, not as a tick count: at ppq 220 a
+    // 1/32 is 27.5 ticks and callers can only hand us 28, which would walk the sub-grid
+    // off the beats a little more every bar. Round the ratio instead and the two grids
+    // are the same grid.
+    function divPerBeat() { return Math.max(1, Math.round(beatTicks() / (grid.ticks || beatTicks() / 4))); }
+    function stepT() { return beatT() / divPerBeat(); }                    // one grid division
     function inGrid(x, y) { return x >= KEYS_W && x < gridRight() && y >= RULER_H && y < gridBottom(); }
     function inVel(x, y) { return x >= KEYS_W && x < gridRight() && y >= gridBottom() && y < H - SB; }
     function inRuler(x, y) { return x >= KEYS_W && y < RULER_H; }
 
+    // Snapping follows the visible grid, so a shifted grid snaps to the shifted lines.
     function snap(tick) {
       if (!grid.snap || !grid.ticks) return Math.max(0, Math.round(tick));
-      return Math.max(0, Math.round(tick / grid.ticks) * grid.ticks);
+      var o = grid.offset || 0, step = stepT();
+      return Math.max(0, Math.round(Math.round((tick - o) / step) * step + o));
     }
 
     // ---- history ------------------------------------------------------------
@@ -102,8 +122,8 @@ var PianoRoll = (function () {
     }
     function growLengthToFit() {
       var maxEnd = P.notes.reduce(function (m, n) { return Math.max(m, n.end); }, 0);
-      var pad = barTicks() * 2;
-      var need = Math.ceil((maxEnd + pad) / barTicks()) * barTicks();
+      var bar = Math.max(1, Math.round(barT())), pad = bar * 2;
+      var need = Math.ceil((maxEnd + pad) / bar) * bar;
       if (need > P.lengthTicks) P.lengthTicks = need;
     }
 
@@ -157,25 +177,42 @@ var PianoRoll = (function () {
     function drawGrid() {
       ctx.save();
       ctx.beginPath(); ctx.rect(KEYS_W, RULER_H, gridViewW(), gridViewH()); ctx.clip();
-      ctx.fillStyle = '#0b0f15'; ctx.fillRect(KEYS_W, RULER_H, gridViewW(), gridViewH());
+      // two tones only: the backdrop IS the black-key colour, white-key rows paint over it
+      ctx.fillStyle = '#080b11'; ctx.fillRect(KEYS_W, RULER_H, gridViewW(), gridViewH());
       // pitch rows
       var pTop = yToPitch(RULER_H), pBot = yToPitch(gridBottom() - 1);
+      // white keys lighter, black keys the backdrop — same reading as the gutter
+      ctx.fillStyle = '#0f1621';
       for (var p = pTop; p >= pBot; p--) {
-        var y = pitchTopY(p);
-        if (!WHITE[((p % 12) + 12) % 12]) { ctx.fillStyle = '#0e141d'; ctx.fillRect(KEYS_W, y, gridViewW(), view.rowH); }
-        if (p % 12 === 0) { ctx.strokeStyle = '#222c3a'; ctx.lineWidth = 1; line(KEYS_W, y + 0.5, gridRight(), y + 0.5); } // C
-        if (guides.markers[p]) { ctx.fillStyle = 'rgba(79,157,255,0.07)'; ctx.fillRect(KEYS_W, y, gridViewW(), view.rowH); }
+        if (WHITE[((p % 12) + 12) % 12]) ctx.fillRect(KEYS_W, pitchTopY(p), gridViewW(), view.rowH);
       }
-      // vertical time lines
-      var ppt = pxPerTick(), step = grid.ticks, bt = beatTicks(), brt = barTicks();
-      var pxStep = step * ppt;
-      var first = Math.floor(xToTick(KEYS_W) / step) * step, last = xToTick(gridRight());
-      for (var t = first; t <= last; t += step) {
+      // octave dividers on top of the fills: the BOTTOM edge of each C row is the B|C
+      // boundary (its top edge would split C from the C# above). Stroking these inside
+      // the fill loop would put them under the next row's paint.
+      ctx.strokeStyle = '#222c3a'; ctx.lineWidth = 1;
+      for (var p2 = pTop; p2 >= pBot; p2--) {
+        if (p2 % 12 === 0) { var yo = Math.round(pitchTopY(p2) + view.rowH) + 0.5; line(KEYS_W, yo, gridRight(), yo); }
+      }
+      // vertical time lines — sub-divisions first, then beats and bars over them.
+      // Beats/bars are counted off the bar grid itself, never off the sub-division, so
+      // they land right even when the division doesn't divide a bar evenly (1/8T at
+      // ppq 220) or the musical tempo scales the grid to fractional ticks.
+      var ppt = pxPerTick(), off = grid.offset || 0, last = xToTick(gridRight());
+      var step = stepT(), pxStep = step * ppt;
+      var k, t, x;
+      if (pxStep >= 7) {                                        // hide sub-beat lines when cramped
+        ctx.strokeStyle = '#171f2a'; ctx.lineWidth = 1;
+        for (k = Math.floor((xToTick(KEYS_W) - off) / step), t = off + k * step; t <= last; k++, t = off + k * step) {
+          if (t < 0) continue;
+          x = Math.round(tickToX(t)) + 0.5; line(x, RULER_H, x, gridBottom());
+        }
+      }
+      var bt = beatT(), perBar = P.timeSig.num || 4;
+      for (k = Math.floor((xToTick(KEYS_W) - off) / bt), t = off + k * bt; t <= last; k++, t = off + k * bt) {
         if (t < 0) continue;
-        var x = Math.round(tickToX(t)) + 0.5, isBar = (t % brt === 0), isBeat = (t % bt === 0);
-        if (!isBeat && pxStep < 7) continue;                    // hide sub-beat lines when cramped
-        ctx.strokeStyle = isBar ? '#3a4658' : isBeat ? '#26303f' : '#171f2a';
-        ctx.lineWidth = isBar ? 1.4 : 1; line(x, RULER_H, x, gridBottom());
+        var isBar = (k % perBar === 0);
+        ctx.strokeStyle = isBar ? '#3a4658' : '#26303f'; ctx.lineWidth = isBar ? 1.4 : 1;
+        x = Math.round(tickToX(t)) + 0.5; line(x, RULER_H, x, gridBottom());
       }
       ctx.restore();
     }
@@ -232,11 +269,11 @@ var PianoRoll = (function () {
       ctx.fillStyle = '#11161f'; ctx.fillRect(KEYS_W, 0, W - KEYS_W, RULER_H);
       ctx.strokeStyle = '#2b3340'; line(KEYS_W, RULER_H - 0.5, W, RULER_H - 0.5);
       ctx.save(); ctx.beginPath(); ctx.rect(KEYS_W, 0, gridViewW(), RULER_H); ctx.clip();
-      var brt = barTicks(), bt = beatTicks();
-      var firstBar = Math.floor(xToTick(KEYS_W) / brt), lastTick = xToTick(gridRight());
+      var brt = barT(), bt = beatT(), off = grid.offset || 0;
+      var firstBar = Math.floor((xToTick(KEYS_W) - off) / brt), lastTick = xToTick(gridRight());
       ctx.font = '11px ui-monospace,Consolas,monospace'; ctx.textBaseline = 'alphabetic';
       for (var b = Math.max(0, firstBar); ; b++) {
-        var bt0 = b * brt; if (bt0 > lastTick) break;
+        var bt0 = off + b * brt; if (bt0 > lastTick) break;
         var x = tickToX(bt0);
         ctx.strokeStyle = '#46566b'; line(Math.round(x) + 0.5, RULER_H - 10, Math.round(x) + 0.5, RULER_H);
         ctx.fillStyle = '#9fb0c4'; ctx.fillText(String(b + 1), x + 3, 13);
@@ -335,22 +372,28 @@ var PianoRoll = (function () {
         else if (!sel.has(hit.note.id)) sel = new Set([hit.note.id]);
         if (opts.onSelection) opts.onSelection(sel.size);
         var before = snapshot();
-        if (hit.edge === 'right') drag = { mode: 'resizeR', before: before, anchor: xToTick(x), orig: snapOrig() };
-        else if (hit.edge === 'left') drag = { mode: 'resizeL', before: before, anchor: xToTick(x), orig: snapOrig() };
-        else if (e.altKey) {                                  // alt-drag the body = duplicate (copy) the selection, then drag the copies
+        // Alt wins over the edge handles: a narrow note is almost all "edge" (within
+        // 5 px of its end), so testing edges first made alt-drag resize instead of
+        // duplicate on exactly the notes you most want to copy. Matches the drum roll.
+        // the note under the cursor is the one the ear follows while dragging
+        var aud = { basePitch: hit.note.pitch, lastPitch: hit.note.pitch, vel: hit.note.velocity };
+        if (e.altKey) {                                       // alt-drag = duplicate (copy) the selection, then drag the copies
           var clones = selectedNotes().map(function (n) { return addNote(n.start, n.end, n.pitch, n.velocity).id; });
           sel = new Set(clones); if (opts.onSelection) opts.onSelection(sel.size);
-          drag = { mode: 'move', before: before, t0: xToTick(x), p0: yToPitch(y), orig: snapOrig() };
+          drag = { mode: 'move', before: before, t0: xToTick(x), p0: yToPitch(y), orig: snapOrig(), aud: aud };
           changed();
         }
-        else drag = { mode: 'move', before: before, t0: xToTick(x), p0: yToPitch(y), orig: snapOrig() };
+        else if (hit.edge === 'right') drag = { mode: 'resizeR', before: before, anchor: xToTick(x), orig: snapOrig() };
+        else if (hit.edge === 'left') drag = { mode: 'resizeL', before: before, anchor: xToTick(x), orig: snapOrig() };
+        else drag = { mode: 'move', before: before, t0: xToTick(x), p0: yToPitch(y), orig: snapOrig(), aud: aud };
         scheduleDraw(); return;
       }
       // empty grid
       if (tool === 'draw' || e.detail === 2) {
-        var st = snap(xToTick(x)), pitch = yToPitch(y), len = grid.ticks || P.ppq / 4;
+        var st = snap(xToTick(x)), pitch = yToPitch(y), len = Math.round(stepT());
         pushHistory(snapshot());
         var n = addNote(st, st + len, pitch, 100); sel = new Set([n.id]);
+        audition(pitch, 100, len * 60 / ((P.timelineTempo || 120) * P.ppq));   // hear what you drew
         drag = { mode: 'resizeR', before: undo[undo.length - 1], anchor: xToTick(x), orig: [{ id: n.id, start: n.start, end: n.end, pitch: n.pitch }], fresh: true };
         changed(); return;
       }
@@ -363,10 +406,12 @@ var PianoRoll = (function () {
     }
 
     function snapOrig() { return selectedNotes().map(function (n) { return { id: n.id, start: n.start, end: n.end, pitch: n.pitch }; }); }
+    // Play a note through the editor synth (drawing / dragging to a new pitch).
+    function audition(pitch, vel, sec) { if (opts.onAudition) opts.onAudition(pitch, vel || 100, sec || 0.25); }
 
     function onMove(e) {
       var pt = localXY(e), x = pt.x, y = pt.y;
-      if (!drag) { updateCursor(x, y); return; }
+      if (!drag) { updateCursor(x, y, e.altKey); return; }
       var free = e.ctrlKey || e.metaKey;                     // hold Ctrl/Cmd while dragging = ignore snap (fine adjust)
       if (drag.mode === 'pan') { view.scrollX = clamp(drag.sx0 - (x - drag.x0), 0, maxScrollX()); view.scrollY = clamp(drag.sy0 - (y - drag.y0), 0, maxScrollY()); scheduleDraw(); return; }
       if (drag.mode === 'scrollH') { var r = (x - drag.x0) / Math.max(1, gridViewW() - 24); view.scrollX = clamp(drag.s0 + r * maxScrollX(), 0, maxScrollX()); scheduleDraw(); return; }
@@ -377,6 +422,10 @@ var PianoRoll = (function () {
       var dT = (free ? Math.round(xToTick(x) - (drag.t0 != null ? drag.t0 : drag.anchor)) : snap(xToTick(x)) - snap(drag.t0 != null ? drag.t0 : drag.anchor));
       if (drag.mode === 'move') {
         var dP = drag.p0 != null ? (yToPitch(y) - drag.p0) : 0;
+        if (drag.aud) {                                        // crossed onto another row → play it
+          var np = clamp(drag.aud.basePitch + dP, 0, 127);
+          if (np !== drag.aud.lastPitch) { drag.aud.lastPitch = np; audition(np, drag.aud.vel, 0.25); }
+        }
         drag.orig.forEach(function (o) {
           var n = byId(o.id); if (!n) return;
           n.start = Math.max(0, o.start + dT); n.end = o.end + dT + 0; n.end = n.start + (o.end - o.start);
@@ -402,7 +451,7 @@ var PianoRoll = (function () {
     }
 
     function changedSince(before) { return JSON.stringify(before.notes) !== JSON.stringify(P.notes); }
-    function minLen() { return Math.max(1, Math.round((grid.ticks || P.ppq / 4) / 8)); }
+    function minLen() { return Math.max(1, Math.round(stepT() / 8)); }
 
     function setVelFromY(y) {
       var laneTop = gridBottom() + VEL_HEAD, laneH = VEL_H - VEL_HEAD, base = laneTop + laneH;
@@ -422,10 +471,10 @@ var PianoRoll = (function () {
       });
       sel = s; if (opts.onSelection) opts.onSelection(sel.size);
     }
-    function updateCursor(x, y) {
+    function updateCursor(x, y, alt) {
       var c = 'default';
       if (inRuler(x, y)) c = 'pointer';
-      else if (inGrid(x, y)) { var h = noteHit(x, y); c = h ? (h.edge === 'body' ? 'move' : 'ew-resize') : (tool === 'draw' ? 'crosshair' : 'default'); }
+      else if (inGrid(x, y)) { var h = noteHit(x, y); c = h ? (alt ? 'copy' : h.edge === 'body' ? 'move' : 'ew-resize') : (tool === 'draw' ? 'crosshair' : 'default'); }
       else if (inVel(x, y)) c = 'ns-resize';
       canvas.style.cursor = c;
     }
@@ -468,18 +517,19 @@ var PianoRoll = (function () {
     function duplicate() {
       var s = selectedNotes(); if (!s.length) return; pushHistory(snapshot());
       var span = Math.max.apply(null, s.map(function (n) { return n.end; })) - Math.min.apply(null, s.map(function (n) { return n.start; }));
-      var shift = Math.max(snap(span), grid.ticks); sel = new Set();
+      var shift = Math.round(Math.max(snap(span), stepT())); sel = new Set();
       s.forEach(function (n) { var d = addNote(n.start + shift, n.end + shift, n.pitch, n.velocity); sel.add(d.id); });
       changed();
     }
     function transpose(semis) { var s = sel.size ? selectedNotes() : P.notes; if (!s.length) return; pushHistory(snapshot()); s.forEach(function (n) { n.pitch = clamp(n.pitch + semis, 0, 127); }); changed(); }
-    function nudge(dt) { var s = selectedNotes(); if (!s.length) return; pushHistory(snapshot()); s.forEach(function (n) { var len = n.end - n.start; n.start = Math.max(0, n.start + dt); n.end = n.start + len; }); changed(); }
+    function nudge(dt) { dt = Math.round(dt); var s = selectedNotes(); if (!s.length) return; pushHistory(snapshot()); s.forEach(function (n) { var len = n.end - n.start; n.start = Math.max(0, n.start + dt); n.end = n.start + len; }); changed(); }
     function quantize(strength, lengths) {
       var s = sel.size ? selectedNotes() : P.notes; if (!s.length) return; pushHistory(snapshot());
       strength = strength == null ? 1 : strength;
+      var o = grid.offset || 0, g = stepT();
       s.forEach(function (n) {
-        var q = Math.round(n.start / grid.ticks) * grid.ticks; n.start = Math.max(0, Math.round(n.start + (q - n.start) * strength));
-        if (lengths) { var qe = Math.max(grid.ticks, Math.round((n.end - n.start) / grid.ticks) * grid.ticks); n.end = n.start + qe; }
+        var q = Math.round((n.start - o) / g) * g + o; n.start = Math.max(0, Math.round(n.start + (q - n.start) * strength));
+        if (lengths) { var qe = Math.max(g, Math.round((n.end - n.start) / g) * g); n.end = n.start + Math.round(qe); }
       });
       changed();
     }
@@ -488,18 +538,22 @@ var PianoRoll = (function () {
     function quantizeAdvanced(o) {
       if (!P.notes.length) return 0;
       pushHistory(snapshot());
-      var g = o.gridTicks, lengths = !!o.lengths;
+      // quantize against the grid as drawn — shifted by the offset, spaced by the musical tempo
+      var g = o.gridTicks * gridScale(), lengths = !!o.lengths, origin = grid.offset || 0;
       P.notes.forEach(function (n) {
         var len = n.end - n.start;
-        var nt = Math.max(0, Math.round(QuantizeCore.snap(n.start, g, o)));
+        var nt = Math.max(0, Math.round(QuantizeCore.snap(n.start - origin, g, o) + origin));
         n.start = nt;
-        if (lengths) { var ql = Math.max(g, Math.round(len / g) * g); n.end = nt + ql; }
+        if (lengths) { var ql = Math.round(Math.max(g, Math.round(len / g) * g)); n.end = nt + ql; }
         else n.end = nt + len;
       });
       changed();
       return P.notes.length;
     }
     function setGridTicks(t) { grid.ticks = t; scheduleDraw(); }
+    // Slide the grid (bar lines, beats, sub-divisions, snapping) in ticks — notes never move.
+    function setGridOffset(t) { grid.offset = Math.round(+t || 0); scheduleDraw(); }
+    function getGridOffset() { return grid.offset || 0; }
     function setSnap(on) { grid.snap = !!on; }
     function setTool(t) { tool = t; canvas.style.cursor = t === 'draw' ? 'crosshair' : 'default'; }
     function setGuides(g) {
@@ -527,6 +581,11 @@ var PianoRoll = (function () {
     // ---- project I/O --------------------------------------------------------
     function load(project) {
       P.ppq = project.ppq || 480; P.tempo = project.tempo || 120;
+      // Callers pass the anchor explicitly; 120 (the SMF default every writer in this
+      // pipeline uses) is the fallback. Never default to project.tempo — that is the
+      // musical BPM the user dialled in, and using it as the anchor makes the grid
+      // scale itself away to 1:1 the moment they change it.
+      P.timelineTempo = project.timelineTempo || 120;
       P.timeSig = project.timeSig || { num: 4, den: 4 };
       idSeq = 1; sel = new Set(); undo = []; redo = []; playhead = 0;
       P.notes = (project.notes || []).map(function (n) { return { id: idSeq++, start: n.start, end: n.end, pitch: n.pitch, velocity: n.velocity || 100 }; });
@@ -534,7 +593,9 @@ var PianoRoll = (function () {
       view.scrollX = 0; view.scrollY = clamp((MAX_PITCH - guides.centerPitch) * view.rowH - gridViewH() / 2, 0, maxScrollY());
       changed();
     }
-    function getProject() { return { ppq: P.ppq, tempo: P.tempo, timeSig: P.timeSig, lengthTicks: P.lengthTicks, notes: P.notes.map(function (n) { return { start: n.start, end: n.end, pitch: n.pitch, velocity: n.velocity }; }) }; }
+    function getProject() { return { ppq: P.ppq, tempo: P.tempo, timelineTempo: P.timelineTempo, gridOffsetTicks: grid.offset || 0, timeSig: P.timeSig, lengthTicks: P.lengthTicks, notes: P.notes.map(function (n) { return { start: n.start, end: n.end, pitch: n.pitch, velocity: n.velocity }; }) }; }
+    // The musical tempo: re-spaces the bar grid (and the metronome). Notes keep their
+    // ticks, so the transcription still plays back locked to the song.
     function setTempo(b) { P.tempo = clamp(b, 20, 320); changed(); }
     function setTimeSig(num, den) { P.timeSig = { num: clamp(num, 1, 32), den: den }; changed(); }
     function setPPQ(q) { P.ppq = q; grid.ticks = q / 4; changed(); }
@@ -556,8 +617,8 @@ var PianoRoll = (function () {
       switch (e.key) {
         case 'Delete': case 'Backspace': e.preventDefault(); deleteSel(); break;
         case 'Escape': clearSel(); break;
-        case 'ArrowLeft': e.preventDefault(); nudge(-(e.shiftKey ? barTicks() : grid.ticks)); break;
-        case 'ArrowRight': e.preventDefault(); nudge(e.shiftKey ? barTicks() : grid.ticks); break;
+        case 'ArrowLeft': e.preventDefault(); nudge(-(e.shiftKey ? barT() : stepT())); break;
+        case 'ArrowRight': e.preventDefault(); nudge(e.shiftKey ? barT() : stepT()); break;
         case 'ArrowUp': e.preventDefault(); transpose(e.shiftKey ? 12 : 1); break;
         case 'ArrowDown': e.preventDefault(); transpose(e.shiftKey ? -12 : -1); break;
         case 'q': case 'Q': quantize(1, e.shiftKey); break;
@@ -585,7 +646,7 @@ var PianoRoll = (function () {
     return {
       load: load, getProject: getProject,
       setTempo: setTempo, setTimeSig: setTimeSig, setPPQ: setPPQ,
-      setGridTicks: setGridTicks, setSnap: setSnap, setTool: setTool, getTool: function () { return tool; },
+      setGridTicks: setGridTicks, setGridOffset: setGridOffset, getGridOffset: getGridOffset, setSnap: setSnap, setTool: setTool, getTool: function () { return tool; },
       setGuides: setGuides,
       selectAll: selectAll, clearSel: clearSel, deleteSel: deleteSel,
       copy: copy, cut: cut, paste: paste, duplicate: duplicate,
@@ -594,7 +655,7 @@ var PianoRoll = (function () {
       setPlayhead: setPlayhead, getPlayhead: function () { return playhead; },
       stats: function () { return { notes: P.notes.length, sel: sel.size, tempo: P.tempo, ppq: P.ppq, ts: P.timeSig, lengthTicks: P.lengthTicks }; },
       redraw: scheduleDraw, pitchName: pitchName,
-      debug: function () { return { scrollX: view.scrollX, scrollY: view.scrollY, pxPerQuarter: view.pxPerQuarter, rowH: view.rowH, maxScrollX: maxScrollX(), maxScrollY: maxScrollY(), gridViewW: gridViewW() }; }
+      debug: function () { return { scrollX: view.scrollX, scrollY: view.scrollY, gridOffset: grid.offset, gridTicks: grid.ticks, gridScale: gridScale(), tempo: P.tempo, timelineTempo: P.timelineTempo, pxPerQuarter: view.pxPerQuarter, rowH: view.rowH, maxScrollX: maxScrollX(), maxScrollY: maxScrollY(), gridViewW: gridViewW() }; }
     };
   }
 

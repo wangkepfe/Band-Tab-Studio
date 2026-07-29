@@ -41,7 +41,10 @@ var Transport = (function () {
 
   function isMelodic() { return view !== 'drumtab'; }
   function project() { return (cfg.getProject && cfg.getProject()) || { ppq: 480, tempo: 120 }; }
-  function tps() { var p = project(); return (p.tempo / 60) * (p.ppq || 480); }   // ticks per second
+  // Ticks per second — off the TIMELINE tempo (the tempo the notes were written at),
+  // never the musical BPM: ticks are positions on the recording, so the playhead has
+  // to walk them at the rate the transcription was made, whatever grid is drawn over it.
+  function tps() { var p = project(); return ((p.timelineTempo || p.tempo || 120) / 60) * (p.ppq || 480); }
   function audioEl() { return source === 'original' ? cfg.audios.original : source === 'stem' ? cfg.audios.stem : null; }
   // The melodic view that owns the playhead right now. Every non-drum view
   // (pianoroll / basstab / guitartab / guitarchords) registers a setPlayheadTick,
@@ -66,7 +69,13 @@ var Transport = (function () {
   // ---- metronome (transport-driven, works for every view + source) ---------
   function metroTempo()  { return isMelodic() ? (project().tempo || 120) : (drumTempo || 120); }
   function metroTsNum()  { return isMelodic() ? ((project().timeSig && project().timeSig.num) || 4) : 4; }
-  function metroOrigin() { return isMelodic() ? 0 : (drumGridOffset || 0); }
+  // Melodic: the click follows the editor's bar grid, so its offset (in timeline
+  // ticks) becomes the origin in seconds. Drums: the bar-grid shift is already seconds.
+  function metroOrigin() {
+    if (!isMelodic()) return drumGridOffset || 0;
+    var p = project(), ppq = p.ppq || 480, tl = p.timelineTempo || p.tempo || 120;
+    return (p.gridOffsetTicks || 0) * (60 / tl) / ppq;
+  }
   function enginePause() {
     if (source === 'synth') { isMelodic() ? cfg.melodicSynth.pause() : cfg.drumSynth.pause(); }
     else if (isYt()) { yt().pause(); }

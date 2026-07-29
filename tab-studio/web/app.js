@@ -55,6 +55,8 @@
     onSelection: function (n) { $('selCount').textContent = n ? '  ·  ' + n + ' selected' : ''; },
     onTool: setToolUI,
     modalOpen: isModalOpen,
+    // hear notes as they are drawn / dragged to another pitch, in the track's own voice
+    onAudition: function (pitch, vel, sec) { EditorPlayer.previewNote(pitch, vel, sec); },
     follow: function () { return $('followChk').checked; }
   });
   var bassTab = BassTabView.create($('tabHost'), {
@@ -200,6 +202,16 @@
   /* ====================== tracks ====================== */
   function trackList() { return Object.keys(project.tracks).map(function (k) { return project.tracks[k]; }); }
 
+  // The tempo the note ticks were written at — what maps a tick to its second in the
+  // song. Tracks saved since this became explicit carry it. For older ones: everything
+  // this backend transcribes comes out of pretty_midi at 220 ppq / 120 BPM, so that
+  // signature means 120 no matter what the tempo box was left on; anything else came
+  // from an imported MIDI, whose own tempo is the anchor.
+  function timelineTempoFor(t) {
+    return t.timelineTempo || (t.ppq === 220 ? 120 : (t.tempo || 120));
+  }
+  function fmtBpm(v) { return Math.round((+v || 120) * 100) / 100; }   // keep fractional BPM (99.4 ≠ 99)
+
   function serializeActive() {
     var id = project.activeTrackId; if (!id) return;
     var t = project.tracks[id]; if (!t) return;
@@ -207,6 +219,8 @@
     else {
       var pj = roll.getProject();
       t.notes = pj.notes; t.ppq = pj.ppq; t.tempo = pj.tempo; t.timeSig = pj.timeSig;
+      t.timelineTempo = pj.timelineTempo || pj.tempo;
+      t.rollGridOffset = roll.getGridOffset();
       var tv = tabViewForInstrument(t.instrument);
       if (tv) { t.view = tv.getOptions(); t.overrides = tv.getOverrides(); }
       // Guitar has two sub-views (6-string tab + chord charts). Remember which one
@@ -235,8 +249,10 @@
       setView('drumtab');
       renderDrumSheet();
     } else {
-      roll.load({ ppq: t.ppq || 480, tempo: t.tempo || 120, timeSig: t.timeSig || { num: 4, den: 4 }, notes: t.notes || [] });
-      $('bpmInput').value = Math.round(t.tempo || 120);
+      roll.load({ ppq: t.ppq || 480, tempo: t.tempo || 120, timelineTempo: timelineTempoFor(t),
+                  timeSig: t.timeSig || { num: 4, den: 4 }, notes: t.notes || [] });
+      roll.setGridOffset(t.rollGridOffset || 0); $('prGridOffset').value = t.rollGridOffset || 0;
+      $('bpmInput').value = fmtBpm(t.tempo || 120);
       $('tsNum').value = (t.timeSig && t.timeSig.num) || 4; $('tsDen').value = (t.timeSig && t.timeSig.den) || 4;
       var tv = tabViewForInstrument(t.instrument);
       if (tv) {
@@ -278,7 +294,7 @@
     var id = opts.id || instrument;
     var t = project.tracks[id] || { id: id, instrument: instrument, kind: 'melodic', name: opts.name || T.label, view: {}, overrides: {} };
     if (opts.name) t.name = opts.name;
-    t.notes = m.notes; t.ppq = m.ppq; t.tempo = m.tempo; t.timeSig = m.timeSig;
+    t.notes = m.notes; t.ppq = m.ppq; t.tempo = m.tempo; t.timelineTempo = m.tempo; t.timeSig = m.timeSig;
     project.tracks[id] = t;
     if (opts.activate !== false) activateTrack(id);
     scheduleSave();
@@ -438,6 +454,7 @@
   function clearEditors() {
     var wasLoading = loading; loading = true;
     roll.load({ ppq: 480, tempo: 120, timeSig: { num: 4, den: 4 }, notes: [] });
+    roll.setGridOffset(0); $('prGridOffset').value = 0;
     drumData = null; if (drumRoll.clearData) drumRoll.clearData(); show($('drumEmpty'), true);
     renderDrumSheet();   // clear the staff to its empty-state (drops the playhead + stale layout)
     bassTab.setOverrides({}); bassTab.render(); guitarTab.setOverrides({}); guitarTab.render(); guitarChords.clear();
@@ -463,7 +480,7 @@
     var tracks = trackList().map(function (t) {
       var o = { id: t.id, instrument: t.instrument, kind: t.kind, name: t.name };
       if (t.kind === 'drum') { o.events = (t.events || []).map(function (e) { return { time_sec: e.time_sec, type: e.type, velocity: e.velocity }; }); o.tempo = t.tempo || 120; o.duration = t.duration || 0; o.gridOffset = t.gridOffset || 0; }
-      else { o.notes = t.notes || []; o.ppq = t.ppq || 480; o.tempo = t.tempo || 120; o.timeSig = t.timeSig || { num: 4, den: 4 }; o.view = t.view || {}; o.overrides = t.overrides || {}; if (t.instrument === 'guitar') { if (t.activeView) o.activeView = t.activeView; o.chordView = t.chordView || {}; } }
+      else { o.notes = t.notes || []; o.ppq = t.ppq || 480; o.tempo = t.tempo || 120; o.timelineTempo = timelineTempoFor(t); o.timeSig = t.timeSig || { num: 4, den: 4 }; o.view = t.view || {}; o.overrides = t.overrides || {}; o.rollGridOffset = t.rollGridOffset || 0; if (t.instrument === 'guitar') { if (t.activeView) o.activeView = t.activeView; o.chordView = t.chordView || {}; } }
       if (t.stem && t.stem.file) o.stem = { file: t.stem.file, name: t.stem.name };
       return o;
     });
@@ -609,7 +626,7 @@
     (meta.tracks || []).forEach(function (t) {
       var tr = { id: t.id || t.instrument, instrument: t.instrument, kind: t.kind, name: t.name || instLabel(t.instrument) };
       if (t.kind === 'drum') { tr.events = t.events || []; tr.tempo = t.tempo || 120; tr.duration = t.duration || 0; tr.gridOffset = t.gridOffset || 0; }
-      else { tr.notes = t.notes || []; tr.ppq = t.ppq || 480; tr.tempo = t.tempo || 120; tr.timeSig = t.timeSig || { num: 4, den: 4 }; tr.view = t.view || {}; tr.overrides = t.overrides || {}; if (t.activeView) tr.activeView = t.activeView; if (t.chordView) tr.chordView = t.chordView; }
+      else { tr.notes = t.notes || []; tr.ppq = t.ppq || 480; tr.tempo = t.tempo || 120; tr.timelineTempo = timelineTempoFor(t); tr.timeSig = t.timeSig || { num: 4, den: 4 }; tr.view = t.view || {}; tr.overrides = t.overrides || {}; tr.rollGridOffset = t.rollGridOffset || 0; if (t.activeView) tr.activeView = t.activeView; if (t.chordView) tr.chordView = t.chordView; }
       if (audUrl && t.stem && t.stem.file) tr.stem = { name: t.stem.name, file: t.stem.file, url: audUrl(t.stem.file), blob: null };
       project.tracks[tr.id] = tr;
     });
@@ -774,6 +791,38 @@
   }
   $('gridSel').addEventListener('change', function () { roll.setGridTicks(gridTicks()); });
   $('snapChk').addEventListener('change', function () { roll.setSnap(this.checked); });
+  // Piano-roll bar-grid shift (move the grid, not the notes — align bar 1 to the music).
+  function applyRollGridOffset(ticks) {
+    ticks = Math.round(+ticks || 0);
+    roll.setGridOffset(ticks);
+    var t = project.tracks[project.activeTrackId];
+    if (t && t.kind !== 'drum') t.rollGridOffset = ticks;
+    $('prGridOffset').value = ticks;
+    if (!loading) scheduleSave();
+  }
+  $('prGridOffset').addEventListener('change', function () { applyRollGridOffset(this.value); });
+  $('prGridOffL').onclick = function () { applyRollGridOffset(roll.getGridOffset() - 10); };
+  $('prGridOffR').onclick = function () { applyRollGridOffset(roll.getGridOffset() + 10); };
+  // Align the roll's bar grid to the song in one click: BPM + grid offset. Prefer the
+  // drum track's numbers — its detector works on hit times in real seconds and is far
+  // steadier than melodic onsets (sustained notes make a weak pulse). No drums → fall
+  // back to the note onsets, converted to seconds through the timeline tempo.
+  $('prAuto').onclick = function () {
+    var pj = roll.getProject();
+    if (!pj.notes.length) { flash('No notes to align the grid to yet.'); return; }
+    var secPerTick = 60 / ((pj.timelineTempo || 120) * (pj.ppq || 480));
+    var dt = trackList().filter(function (t) { return t.kind === 'drum' && (t.events || []).length; })[0];
+    var bpm, originSec, src;
+    if (dt) { bpm = dt.tempo || 120; originSec = dt.gridOffset || 0; src = 'drum track'; }
+    else {
+      var r = TempoCore.analyze(pj.notes.map(function (n) { return n.start * secPerTick; }).sort(function (a, b) { return a - b; }),
+                                { tsNum: +$('tsNum').value || 4 });
+      bpm = r.bpm; originSec = r.offsetSec; src = 'note onsets';
+    }
+    roll.setTempo(bpm); $('bpmInput').value = fmtBpm(bpm);
+    applyRollGridOffset(Math.round(originSec / secPerTick));
+    flash('Auto: ' + fmtBpm(bpm) + ' BPM · grid offset ' + Math.round(originSec * 1000) + ' ms (from the ' + src + ').');
+  };
   function setToolUI(t) { $('toolSelect').classList.toggle('on', t === 'select'); $('toolDraw').classList.toggle('on', t === 'draw'); }
   $('toolSelect').onclick = function () { roll.setTool('select'); setToolUI('select'); };
   $('toolDraw').onclick = function () { roll.setTool('draw'); setToolUI('draw'); };
@@ -806,9 +855,13 @@
     // read the meter from the project (what the tab actually renders against), not
     // the shared DOM boxes — they can lag behind on a track switch.
     var ppq = p.ppq || 480, ts = p.timeSig || { num: 4, den: 4 };
-    var tsNum = ts.num || 4, den = ts.den || 4, barTicks = ppq * 4 * tsNum / den;
+    // Measure bars the way the tab now draws them: on the musical tempo, which is
+    // ppq × timelineTempo/tempo ticks wide.
+    var musicalTempo = p.tempo || 120;
+    var layoutPpq = ppq * ((p.timelineTempo || musicalTempo) / musicalTempo);
+    var tsNum = ts.num || 4, den = ts.den || 4, barTicks = layoutPpq * 4 * tsNum / den;
     var starts = p.notes.map(function (n) { return { t: n.start, w: (n.velocity || 100) / 100 }; });
-    var r = TempoCore.detectBarOffsetTicks(starts, { ppq: ppq, tsNum: tsNum, den: den });
+    var r = TempoCore.detectBarOffsetTicks(starts, { ppq: layoutPpq, tsNum: tsNum, den: den });
     var off = r.offsetTicks;
     // A leftward (negative) shift moves notes earlier; transformNotes drops/clamps
     // any pushed before tick 0, silently erasing a pickup. If that would happen,
@@ -832,6 +885,7 @@
   $('btOctDown').onclick = function () { btOpts({ octaveShift: (bassTab.getOptions().octaveShift || 0) - 1 }); };
   $('btCopy').onclick = function () { var a = bassTab.getAscii && bassTab.getAscii(); if (!a) { flash('No tab yet.'); return; } navigator.clipboard && navigator.clipboard.writeText(a); flash('ASCII tab copied.'); };
   $('btExport').onclick = function () { var a = bassTab.getAscii && bassTab.getAscii(); if (!a) { flash('No tab yet.'); return; } download(new TextEncoder().encode(a), (project.name || 'bass') + '-tab.txt', 'text/plain'); };
+  $('btPrint').onclick = function () { printFrettedTab(bassTab, 'Bass'); };
   function updateErgo(ergo) { var e = $('btErgo'); if (!e) return; e.textContent = ergo ? (ergo.rating + ' · ' + ergo.noteCount + ' notes · frets ' + ergo.minFret + '–' + ergo.maxFret) : '—'; }
   function syncBassToolbar(v) {
     if ($('btMono')) $('btMono').checked = v.monophonic !== false;
@@ -991,7 +1045,10 @@
   $('btnExportMidi').onclick = function () {
     var t = project.tracks[project.activeTrackId];
     if (t && t.kind === 'drum') { exportDrumMidi(); return; }
-    download(MidiIO.write(roll.getProject()), (project.name || 'studio') + '.mid', 'audio/midi');
+    // Note ticks are on the timeline's tempo, so the file carries that tempo — the
+    // exported MIDI still lines up with the song second-for-second.
+    var pj = roll.getProject(); pj.tempo = pj.timelineTempo || pj.tempo;
+    download(MidiIO.write(pj), (project.name || 'studio') + '.mid', 'audio/midi');
   };
   /* ====================== quantize modal (all instrument types) ====================== */
   (function () {
@@ -1109,6 +1166,55 @@
     var blob = new Blob([bytes], { type: mime || 'application/octet-stream' }), url = URL.createObjectURL(blob);
     var a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click();
     document.body.removeChild(a); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function escHtml(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  // Open a clean black-and-white copy of a fretted tab (bass/guitar) in a new
+  // window and invoke the browser's print dialog — the user prints it or picks
+  // "Save as PDF". No difficulty colours, no fingering; everything is vector SVG,
+  // so the PDF stays crisp at any scale. Each system is scaled to the page width
+  // at one uniform units→page ratio (the last, shorter line stays proportionally
+  // narrower) and never splits across a page.
+  function printFrettedTab(view, label) {
+    var p = view.getPrintable && view.getPrintable();
+    if (!p) { flash('No tab yet — nothing to print.'); return; }
+    var title = project.name || label || 'Tab';
+    // split the rendered systems, give each a proportional width so bars keep a
+    // constant size across lines (viewBox + CSS width:100% keeps them vector-crisp).
+    var parts = p.systemsHtml.match(/<svg[\s\S]*?<\/svg>/g) || [];
+    var maxW = 1;
+    parts.forEach(function (s) { var m = s.match(/data-w="([\d.]+)"/); if (m) maxW = Math.max(maxW, +m[1]); });
+    var systems = parts.map(function (s) {
+      var m = s.match(/data-w="([\d.]+)"/), w = m ? +m[1] : maxW;
+      return '<div class="sys" style="width:' + (w / maxW * 100).toFixed(3) + '%">' + s + '</div>';
+    }).join('');
+    var ts = p.timeSig || { num: 4, den: 4 };
+    var sub = ['Tuning ' + p.tuning, p.tempo + ' BPM', ts.num + '/' + ts.den];
+    if (p.ergo) sub.push('frets ' + p.ergo.minFret + '-' + p.ergo.maxFret);
+    var doc =
+      '<!doctype html><html><head><meta charset="utf-8"><title>' + escHtml(title) + '</title><style>' +
+      '@page{margin:0}' +
+      'html,body{background:#fff;margin:0}' +
+      'body{color:#000;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;' +
+        'padding:14mm 12mm;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.head{margin:0 0 12px;border-bottom:1px solid #ddd;padding-bottom:8px}' +
+      '.head h1{font-size:19px;margin:0 0 3px;font-weight:700;color:#000}' +
+      '.head .sub{font-size:12px;color:#444}.head .sub b{color:#000;font-weight:600}' +
+      '.sys{break-inside:avoid;page-break-inside:avoid;margin:0 0 7px}' +
+      '.sys svg{display:block;width:100%;height:auto}' +
+      '.foot{margin-top:12px;font-size:10px;color:#999}' +
+      '</style></head><body>' +
+      '<div class="head"><h1>' + escHtml(title) + '</h1>' +
+      '<div class="sub"><b>' + escHtml(label) + '</b> &nbsp;·&nbsp; ' + sub.map(escHtml).join(' &nbsp;·&nbsp; ') + '</div>' +
+      '</div>' +
+      '<div class="sheet">' + systems + '</div>' +
+      '<div class="foot">Made with Band Tab Studio</div>' +
+      '</body></html>';
+    var w = window.open('', '_blank');
+    if (!w) { flash('Allow pop-ups to print/save the tab as PDF.'); return; }
+    w.document.open(); w.document.write(doc); w.document.close(); w.focus();
+    // inline SVG lays out synchronously; a short beat lets the window paint first.
+    setTimeout(function () { try { w.print(); } catch (e) {} }, 250);
   }
 
   window.addEventListener('beforeunload', function (e) { if (dirty) { e.preventDefault(); e.returnValue = ''; } });

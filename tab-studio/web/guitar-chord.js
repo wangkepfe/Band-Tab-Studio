@@ -76,9 +76,14 @@ var GuitarChordView = (function () {
     function render() {
       var p = getProject() || {};
       var notes = (p.notes || []);
-      geom.ppq = p.ppq || 480; geom.tempo = p.tempo || 120;
+      // Bars are measured on the musical tempo while the note ticks sit on the
+      // timeline's, so the ppq the ribbon works in scales by their ratio (same rule as
+      // the piano-roll grid and the fretted tabs). Seek reads back real seconds because
+      // tick × 60/(tempo × ppq) collapses to the timeline tempo again.
+      geom.tempo = p.tempo || 120;
+      geom.ppq = (p.ppq || 480) * ((p.timelineTempo || geom.tempo) / geom.tempo);
       var ts = (p.timeSig) || { num: 4, den: 4 };
-      geom.beatTicks = Math.round(geom.ppq * 4 / ts.den);
+      geom.beatTicks = geom.ppq * 4 / ts.den;
       geom.spb = ts.num;
       if (!notes.length) {
         container.innerHTML = '<div class="gc-empty">No notes yet — transcribe a guitar part or add notes to see its chords.</div>';

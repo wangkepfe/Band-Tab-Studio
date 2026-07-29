@@ -106,7 +106,7 @@
     </span>
   </div>
   <div class="grp settings-extra">
-    <label class="inline">BPM <input type="number" id="bpmInput" min="20" max="320" value="120"></label>
+    <label class="inline" title="Musical tempo — spaces the bar grid and the metronome. The notes keep their timing, so the transcription stays lined up with the song.">BPM <input type="number" id="bpmInput" min="20" max="320" step="0.01" value="120"></label>
     <label class="inline">time <input type="number" id="tsNum" min="1" max="32" value="4"><span class="dim">/</span><input type="number" id="tsDen" min="1" max="32" value="4"></label>
   </div>
   <div class="grp grow"></div>
@@ -132,6 +132,10 @@
       </select>
     </label>
     <label class="inline chk"><input type="checkbox" id="snapChk" checked> snap</label>
+    <label class="inline" title="Slide the bar grid in time (ticks) to line bar 1 up with the music — the notes stay put, only the grid moves">grid offset <input type="number" class="wide" id="prGridOffset" step="10" value="0"></label>
+    <button class="icon sm" id="prGridOffL" title="Nudge grid earlier (−10 ticks)">◄</button>
+    <button class="icon sm" id="prGridOffR" title="Nudge grid later (+10 ticks)">►</button>
+    <button class="btn sm" id="prAuto" title="Auto-align the bar grid to the song — sets BPM + grid offset (from the drum track when there is one)">✨ Auto</button>
   </div>
   <div class="grp">
     <button class="btn sm" id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
@@ -184,6 +188,7 @@
   <div class="grp">
     <button class="btn sm" id="btCopy" title="Copy ASCII tab">Copy ASCII</button>
     <button class="btn sm" id="btExport" title="Download .txt tab">Export .txt</button>
+    <button class="btn sm" id="btPrint" title="Print the tab or save it as a PDF">🖨 Print / PDF</button>
     <span class="dim hide-mobile" style="font-size:11px">click a note to change its position · right-click to reset</span>
   </div>
 </div>
@@ -394,7 +399,8 @@
         <div class="guide-row"><span class="g-keys"><kbd>Synth</kbd> <kbd>Original</kbd> <kbd>Stem</kbd></span><span class="g-desc">A/B what Play controls — the transcription vs. the source song vs. the isolated stem.</span></div>
         <div class="guide-row"><span class="g-keys"><kbd>♩</kbd></span><span class="g-desc">Metronome on/off — a click track that follows whatever's playing (synth, song or stem), in every view.</span></div>
         <div class="guide-row"><span class="g-keys"><kbd>⊞ Quantize</kbd></span><span class="g-desc">Snap the whole track to a grid — pick the grid (incl. triplets), add <b>swing/shuffle</b> (66% = triplet feel), <b>bias</b> toward the previous/next line and an <b>amount</b> under 100% to keep some human feel. Works for bass, piano <i>and</i> drums.</span></div>
-        <div class="guide-row"><span class="g-keys">BPM · time</span><span class="g-desc">Tempo and time-signature for the grid + synth.</span></div>
+        <div class="guide-row"><span class="g-keys">BPM · time</span><span class="g-desc">The song's tempo and time-signature: they space the bar grid and the metronome. Notes are never re-timed, so the transcription keeps playing in step with the song.</span></div>
+        <div class="guide-row"><span class="g-keys">grid offset · <kbd>✨ Auto</kbd></span><span class="g-desc">Slides the piano-roll bar grid in time (ticks) — pair it with BPM to line bar 1 up with music that starts off-grid. The notes stay put; only the grid moves. <b>Auto</b> sets both at once, borrowing the drum track's detected tempo and downbeat when the project has drums.</span></div>
         <div class="guide-row"><span class="g-keys">follow</span><span class="g-desc">Auto-scroll the piano roll to keep the playhead in view.</span></div>
       </section>
 
@@ -402,7 +408,7 @@
         <h3>3 · Piano roll — mouse</h3>
         <div class="guide-row"><span class="g-keys">Draw / dbl-click</span><span class="g-desc">Make a note on empty grid (Draw tool, or double-click any time).</span></div>
         <div class="guide-row"><span class="g-keys">Drag</span><span class="g-desc">Body = move · left/right edge = resize.</span></div>
-        <div class="guide-row"><span class="g-keys"><kbd>Alt</kbd> + drag body</span><span class="g-desc"><b>Duplicate</b> — drags a copy of the note/selection (drag an edge still resizes).</span></div>
+        <div class="guide-row"><span class="g-keys"><kbd>Alt</kbd> + drag</span><span class="g-desc"><b>Duplicate</b> — drags a copy of the note/selection. Works anywhere on a note; the cursor turns into a <b>copy</b> pointer while Alt is held.</span></div>
         <div class="guide-row"><span class="g-keys"><kbd>Ctrl</kbd> + drag</span><span class="g-desc">Fine adjust — temporarily ignore grid snap.</span></div>
         <div class="guide-row"><span class="g-keys">Drag empty</span><span class="g-desc">Marquee-select; <kbd>Shift</kbd>+drag adds to the selection.</span></div>
         <div class="guide-row"><span class="g-keys"><kbd>Shift</kbd> + click</span><span class="g-desc">Toggle a note in / out of the selection.</span></div>

@@ -33,6 +33,30 @@ var BassTabView = (function () {
     hard: { fill: '#3a161a', stroke: '#f85149', text: '#ffb0ad' }
   };
 
+  // Colour palettes for renderVisual. SCREEN is the app's dark theme (keeps the
+  // CSS-var hooks so studio.css theming still applies); PRINT is a light, ink-on-
+  // white theme used to export a printable PDF (see getPrintable()). renderVisual
+  // reads settings.palette, defaulting to SCREEN so on-screen output is unchanged.
+  var PAL_SCREEN = {
+    pageBg: '#0b0f15', barLine: '#48566a', beatLine: '#222a36', rhythmRef: '#1d2430',
+    string: 'var(--string,#3a4452)', stringName: '#9aa6b5', barNum: '#7d8aa0',
+    rhythmInk: '#c2ccda', finger: '#9fb0c4', accent: 'var(--accent2,#7c5cff)', diff: DIFF
+  };
+  // PRINT is pure black-on-white for printing: no difficulty colours (all three
+  // levels render identical white boxes with a black border + black fret number),
+  // black staff/strings, light-grey beat gridlines. Fingering is suppressed for
+  // print via settings.showFingers (see getPrintable), so `finger` is unused here.
+  var PAL_PRINT = {
+    pageBg: '#ffffff', barLine: '#000000', beatLine: '#c8c8c8', rhythmRef: '#dcdcdc',
+    string: '#111111', stringName: '#000000', barNum: '#000000',
+    rhythmInk: '#000000', finger: '#000000', accent: '#000000',
+    diff: {
+      easy: { fill: '#ffffff', stroke: '#000000', text: '#000000' },
+      med:  { fill: '#ffffff', stroke: '#000000', text: '#000000' },
+      hard: { fill: '#ffffff', stroke: '#000000', text: '#000000' }
+    }
+  };
+
   // grid select value (note fraction) -> ticks, resolved against the project ppq.
   // 1/4=ppq, 1/8=ppq/2, 1/8T=ppq/3, 1/16=ppq/4, 1/16T=ppq/6, 1/32=ppq/8.
   function gridDivToTicks(div, ppq) {
@@ -153,6 +177,20 @@ var BassTabView = (function () {
         den: (project && project.timeSig && project.timeSig.den) || 4
       };
 
+      // Note ticks sit on the timeline's tempo (what the transcription was written at),
+      // while the BPM box holds the song's musical tempo. A bar therefore covers
+      // ppq × timelineTempo/musicalTempo ticks, so hand the layout a scaled ppq — bars,
+      // beats, grid columns and rhythm values all stretch by the same factor and the
+      // barlines land where the music's bars are, exactly like the piano roll's grid.
+      var musicalTempo = (project && project.tempo) || 120;
+      var timelineTempo = (project && project.timelineTempo) || musicalTempo;
+      var layoutPpq = ppq * (timelineTempo / musicalTempo);
+      song.ppq = layoutPpq;
+      // Snap the division to one that fits the bar a whole number of times — at ppq 220
+      // a rounded 1/32 (28 ticks) would walk the columns off the barlines.
+      var ticksPerBar = layoutPpq * 4 * ts.num / ts.den;
+      var steps = Math.max(1, Math.round(ticksPerBar / gridDivToTicks(options.gridDiv, layoutPpq)));
+
       var settings = {
         tuning: tuning,
         maxFret: +options.maxFret || 24,
@@ -160,10 +198,10 @@ var BassTabView = (function () {
         octaveShift: +options.octaveShift || 0,    // OCTAVES (core multiplies by 12)
         semitoneShift: +options.semitoneShift || 0, // semitones
         tickShift: +options.offsetTicks || 0,       // nudge tab in time (pickup/bar-1 align)
-        gridTicks: gridDivToTicks(options.gridDiv, ppq),
+        gridTicks: ticksPerBar / steps,
         originTick: 0,
         barsPerLine: +options.barsPerLine || 4,
-        bpmOverride: 0,
+        bpmOverride: musicalTempo,                  // with layoutPpq this reads back real seconds
         avoidOpen: !!options.avoidOpen,
         overrides: overrides
       };
@@ -172,8 +210,8 @@ var BassTabView = (function () {
       lastResult = r;
       lastSong = song;
       lastSettings = settings;
-      geom.ppq = ppq;
-      geom.tempo = (project && project.tempo) || 120;
+      geom.ppq = layoutPpq;                         // seek maps click → tick → seconds with these two
+      geom.tempo = musicalTempo;
 
       container.innerHTML = renderVisual(r, settings, song) ||
         '<div class="bt-empty">No notes to display.</div>';
@@ -191,6 +229,8 @@ var BassTabView = (function () {
     // playhead + seek logic read back.
     function renderVisual(r, settings, song) {
       var ts = settings.timeSig, tuning = r.tuning;
+      var pal = (settings && settings.palette) || PAL_SCREEN;
+      var DIFF = pal.diff;
       var cols = r.layout.columns, spb = r.layout.stepsPerBar;
       var totalBars = cols.length ? cols[cols.length - 1].bar + 1 : 0;
       var grid = settings.gridTicks;
@@ -215,7 +255,9 @@ var BassTabView = (function () {
       var colW = Math.max(13, Math.round(58 / colsPerBeat));
       var rowH = 28, topPad = 30, leftPad = 26, badgeH = 18, nS = tuning.length;
       var barsPerSys = settings.barsPerLine;
-      var showFing = !!options.showFingers;
+      // print passes settings.showFingers:false to force fingering off regardless
+      // of the on-screen toggle; on screen settings.showFingers is undefined → use the option.
+      var showFing = (settings.showFingers != null) ? !!settings.showFingers : !!options.showFingers;
       var diffArr = r.ergo.perNoteDifficulty;
 
       // per-note: how many fretboard positions sound this pitch, and is it pinned?
@@ -230,7 +272,7 @@ var BassTabView = (function () {
       var rhyHeadY = topPad + nS * rowH + 14;    // notehead row of the rhythm lane
       var stemBottom = rhyHeadY + 16;
       var H = stemBottom + 12;
-      var RINK = '#c2ccda';                      // rhythm ink (neutral)
+      var RINK = pal.rhythmInk;                  // rhythm ink (from palette)
 
       // --- rhythm glyph builders (x = column centre) ---
       function noteGlyph(x, val) {
@@ -238,7 +280,7 @@ var BassTabView = (function () {
         if (d >= 2) g += '<line x1="' + x + '" y1="' + rhyHeadY + '" x2="' + x + '" y2="' + stemBottom + '" stroke="' + RINK + '" stroke-width="1.5"/>';
         for (var f = 0; f < flags; f++) { var yb = stemBottom - f * 5;
           g += '<line x1="' + x + '" y1="' + yb + '" x2="' + (x + 8) + '" y2="' + (yb - 3) + '" stroke="' + RINK + '" stroke-width="2.3" stroke-linecap="round"/>'; }
-        g += '<ellipse cx="' + x + '" cy="' + rhyHeadY + '" rx="4.3" ry="3.1" fill="' + (filled ? RINK : '#0b0f15') + '" stroke="' + RINK + '" stroke-width="1.4"/>';
+        g += '<ellipse cx="' + x + '" cy="' + rhyHeadY + '" rx="4.3" ry="3.1" fill="' + (filled ? RINK : pal.pageBg) + '" stroke="' + RINK + '" stroke-width="1.4"/>';
         if (val.dotted) g += '<circle cx="' + (x + 8) + '" cy="' + rhyHeadY + '" r="1.5" fill="' + RINK + '"/>';
         return g;
       }
@@ -294,20 +336,20 @@ var BassTabView = (function () {
           if (c % colsPerBeat === 0) {
             var isBar = (c % spb === 0);
             svg += '<line x1="' + X(c) + '" y1="' + (topPad - (isBar ? 14 : 6)) + '" x2="' + X(c) + '" y2="' + (isBar ? stemBottom + 2 : eLineY) +
-                   '" stroke="' + (isBar ? '#48566a' : '#222a36') + '" stroke-width="' + (isBar ? 1.4 : 1) + '"/>';
+                   '" stroke="' + (isBar ? pal.barLine : pal.beatLine) + '" stroke-width="' + (isBar ? 1.4 : 1) + '"/>';
           }
         }
         // faint rhythm reference line (rest positioning)
-        svg += '<line x1="' + leftPad + '" y1="' + rhyHeadY + '" x2="' + (W - 6) + '" y2="' + rhyHeadY + '" stroke="#1d2430" stroke-width="1"/>';
+        svg += '<line x1="' + leftPad + '" y1="' + rhyHeadY + '" x2="' + (W - 6) + '" y2="' + rhyHeadY + '" stroke="' + pal.rhythmRef + '" stroke-width="1"/>';
         // string lines + names
         for (var si = nS - 1; si >= 0; si--) {
           var y = yOf(si);
-          svg += '<line x1="' + leftPad + '" y1="' + y + '" x2="' + (W - 6) + '" y2="' + y + '" stroke="var(--string,#3a4452)" stroke-width="1"/>';
-          svg += '<text x="6" y="' + (y + 4) + '" fill="#9aa6b5" font-family="monospace" font-size="12">' + tuning[si].name + '</text>';
+          svg += '<line x1="' + leftPad + '" y1="' + y + '" x2="' + (W - 6) + '" y2="' + y + '" stroke="' + pal.string + '" stroke-width="1"/>';
+          svg += '<text x="6" y="' + (y + 4) + '" fill="' + pal.stringName + '" font-family="monospace" font-size="12">' + tuning[si].name + '</text>';
         }
         // bar numbers
         for (var bb = b0; bb < b1; bb++)
-          svg += '<text x="' + (X(bb * spb) + 3) + '" y="14" fill="#7d8aa0" font-size="11" font-family="monospace">' + (bb + 1) + '</text>';
+          svg += '<text x="' + (X(bb * spb) + 3) + '" y="14" fill="' + pal.barNum + '" font-size="11" font-family="monospace">' + (bb + 1) + '</text>';
 
         // duration "pills" — LEFT edge = note start, RIGHT edge = note end. A note
         // that sustains past the row gets an open (flat) right edge and is carried
@@ -331,17 +373,17 @@ var BassTabView = (function () {
             var cyc = altCount[i] > 1, ov = isOverridden[i];
             var tip = BassTab.pitchName(n.pitch) + (onset ? (cyc ? ' · ' + altCount[i] + ' positions — click to cycle' : ' · only position') + (ov ? ' · manual (right-click to reset)' : '') : ' · held');
             svg += '<g data-note="' + i + '"' + (cyc ? ' class="note"' : '') + '><title>' + tip + '</title>';
-            svg += '<path d="' + pillPath(x0, yTop, x1 - x0, badgeH, !openL, !openR) + '" fill="' + d.fill + '"' + (onset ? '' : ' fill-opacity="0.8"') + ' stroke="' + (ov ? 'var(--accent2,#7c5cff)' : d.stroke) + '" stroke-width="' + (ov ? 1.8 : 1.3) + '"/>';
+            svg += '<path d="' + pillPath(x0, yTop, x1 - x0, badgeH, !openL, !openR) + '" fill="' + d.fill + '"' + (onset ? '' : ' fill-opacity="0.8"') + ' stroke="' + (ov ? pal.accent : d.stroke) + '" stroke-width="' + (ov ? 1.8 : 1.3) + '"/>';
             if (onset) {
               var numX = openR ? (x0 + (p.fret >= 10 ? 11 : 9)) : (x0 + (x1 - x0) / 2);
               svg += '<text x="' + numX + '" y="' + (yy + 4) + '" text-anchor="middle" fill="' + d.text + '" font-family="monospace" font-size="12" font-weight="700">' + p.fret + '</text>';
               if (showFing && p.finger > 0)
-                svg += '<text x="' + (x0 + 2) + '" y="' + (yTop - 2) + '" fill="#9fb0c4" font-size="9" font-family="monospace">' + p.finger + '</text>';
+                svg += '<text x="' + (x0 + 2) + '" y="' + (yTop - 2) + '" fill="' + pal.finger + '" font-size="9" font-family="monospace">' + p.finger + '</text>';
               if (ov) {
                 // keep the override dot next to the fret number; for a note that runs
                 // off the row, x1 is at the far margin, so anchor near numX instead.
                 var ovX = openR ? (numX + (p.fret >= 10 ? 9 : 7)) : (x1 - 2.6);
-                svg += '<circle cx="' + ovX + '" cy="' + (yTop + 2.6) + '" r="2.6" fill="var(--accent2,#7c5cff)" stroke="#0b0f15" stroke-width="0.8"/>';
+                svg += '<circle cx="' + ovX + '" cy="' + (yTop + 2.6) + '" r="2.6" fill="' + pal.accent + '" stroke="' + pal.pageBg + '" stroke-width="0.8"/>';
               }
             }
             svg += '</g>';
@@ -534,6 +576,26 @@ var BassTabView = (function () {
       lastResult = null; lastSong = null; lastSettings = null;
     }
 
+    // Build a print-ready (light-theme) copy of the current tab for PDF export.
+    // Re-renders the cached last result with the PRINT palette so the on-screen
+    // (dark) tab is left untouched, and returns the light SVG systems plus the
+    // header facts (tuning/tempo/meter/ergo). Null when there's no tab yet.
+    function getPrintable() {
+      if (!lastResult || !lastSong || !lastSettings) return null;
+      var pset = Object.assign({}, lastSettings, { palette: PAL_PRINT, showFingers: false });
+      var systemsHtml = renderVisual(lastResult, pset, lastSong);
+      if (!systemsHtml) return null;
+      var tun = (lastResult.tuning || tuning).map(function (t) { return t.name; }).join(' ');
+      return {
+        systemsHtml: systemsHtml,
+        tuning: tun,
+        tempo: Math.round(geom.tempo || 120),
+        timeSig: lastSettings.timeSig || { num: 4, den: 4 },
+        ergo: lastResult.ergo || null,
+        pal: PAL_PRINT
+      };
+    }
+
     return {
       render: render,
       setOptions: setOptions,
@@ -542,6 +604,7 @@ var BassTabView = (function () {
       setZoom: setZoom,
       getZoom: getZoom,
       getAscii: function () { return lastResult ? lastResult.ascii : ''; },
+      getPrintable: getPrintable,
       getOverrides: getOverrides,
       setOverrides: setOverrides,
       clear: clear
