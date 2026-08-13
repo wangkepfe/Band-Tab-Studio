@@ -7,6 +7,21 @@
     "build": "node build.js",
     "test": "node tab-studio/test-core.js"
   },
-  "keywords": ["midi", "bass", "tablature", "tab", "drums", "piano-roll", "demucs", "basic-pitch", "stem", "transcription", "youtube"],
-  "homepage": "https://github.com/wangkepfe/Bass-Tab-Creator"
+  "keywords": [
+    "midi",
+    "bass",
+    "tablature",
+    "tab",
+    "drums",
+    "piano-roll",
+    "demucs",
+    "basic-pitch",
+    "stem",
+    "transcription",
+    "youtube"
+  ],
+  "homepage": "https://github.com/wangkepfe/Band-Tab-Studio",
+  "devDependencies": {
+    "wrangler": "^4.122.0"
+  }
 }

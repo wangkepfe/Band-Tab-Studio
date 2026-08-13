@@ -1,0 +1,15 @@
+{
+  "name": "band-tab-studio-worker",
+  "version": "3.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker for Band Tab Studio — Better Auth (GitHub OAuth only) over D1, plus the public project library API. Bundled by wrangler/esbuild; there is no build step of its own.",
+  "_declaredNotInstalled": "These dependencies are DECLARED here, not installed by this commit. Run `npm install` inside worker/ (or hoist them into the root package.json) before the first `wrangler deploy`. Nothing in worker/ is importable until then.",
+  "_typeModule": "\"type\": \"module\" is load-bearing: every file in worker/ is ESM (import/export), while tab-studio/web/*.js is deliberately the opposite — ES5 IIFEs with no bundler. This manifest is what keeps the two halves of the repo from being parsed under the same rules.",
+  "_schemaSeam": "better-auth's CLI, run against a DRIZZLE adapter, emits a drizzle schema file rather than SQL — it will NOT generate migrations/0000_better_auth.sql. The authoritative DDL for the user/session/account/verification tables is written out in the header comment of worker/auth.js and must be transcribed into that migration by hand. assertAuthSchema(env) probes for it at boot.",
+  "_bundleSize": "better-auth + drizzle-orm are expected to land around 500 KB minified, against the 3 MB Workers script cap. Measure it for real with `wrangler deploy --dry-run --outdir=.wrangler/size` before route work fans out; drizzle-orm is tree-shakeable and only sqlite-core + d1 are imported here.",
+  "dependencies": {
+    "better-auth": "^1.3.0",
+    "drizzle-orm": "^0.45.2"
+  }
+}

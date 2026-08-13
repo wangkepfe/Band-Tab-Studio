@@ -17,10 +17,13 @@
     <button class="btn sm primary" id="btnSaveProj" title="Save / update this project">Save</button>
     <button class="btn sm" id="btnOpenFile" title="Open a project file (.studio.json) from your device">Open file</button>
     <input type="file" id="projFileInput" accept=".json,application/json" hidden>
+    <button class="btn sm cloud-only" id="btnDuplicate" title="Make your own copy of this project">⧉ Duplicate</button>
     <button class="btn sm" id="btnLibrary" title="Open the project library">📁 Library</button>
     <span class="dim" id="saveStatus" title="Save state"></span>
   </span>
   <span class="grow"></span>
+  <!-- Cloud sign-in. Rendered by renderAuthUI(); hidden entirely in web/desktop. -->
+  <span class="auth cloud-only" id="authSlot"></span>
   <span class="pill desktop-only" id="backendPill">checking…</span>
 </header>
 
@@ -329,6 +332,10 @@
     </div>
     <div class="lib-controls">
       <input type="search" id="libSearch" placeholder="Search projects…" autocomplete="off" spellcheck="false">
+      <!-- Cloud only, and only while signed in: the Worker rejects mine=1 anonymously. -->
+      <label class="inline chk cloud-only" id="libMineWrap" style="display:none">
+        <input type="checkbox" id="libMine"> My projects
+      </label>
     </div>
     <div class="lib-list" id="libList"></div>
     <div class="lib-empty" id="libEmpty" style="display:none"></div>
@@ -479,6 +486,12 @@
 <div class="toast" id="toast"></div>
 
 <script src="config.js"></script>
+<!-- Cloud modules. Loaded after config.js because all three read STUDIO_CONFIG.mode
+     and go inert unless it is 'cloud'; loaded before app.js because app.js wires them
+     at boot. Order matters between them: sync.js reads Store and Api at init. -->
+<script src="store.js"></script>
+<script src="api.js"></script>
+<script src="sync.js"></script>
 <script src="midi-io.js"></script>
 <script src="bass-tab-core.js"></script>
 <script src="chord-core.js"></script>

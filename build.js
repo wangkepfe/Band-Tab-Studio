@@ -1,15 +1,25 @@
 /* ============================================================================
- * build.js — assemble dist/ for the WEB build (Cloudflare Workers static assets
- * or Pages). Node >= 18, zero dependencies.
+ * build.js — assemble dist/ for the hosted builds. Node >= 18, zero dependencies.
  *
- * The web build is the OFFLINE editor + the bundled project library: full in-browser
- * editor, no backend (no AI; the bundled projects open read-only and edits are kept
- * via "Save file" — a downloaded .studio.json). It is the desktop app's frontend with
- * config.js forced to mode='web'.
+ * TWO TARGETS, selected by an ARGV FLAG (not an env var: release-web.bat is a cmd
+ * script, where `STUDIO_MODE=cloud node build.js` is not a thing):
+ *
+ *   node build.js           mode 'web'   — DEFAULT. The OFFLINE editor + the bundled
+ *                           project library: full in-browser editor, no backend and no
+ *                           network (no AI; the bundled projects open read-only and
+ *                           edits are kept via "Save file" — a downloaded .studio.json).
+ *                           This is what release-web.bat zips and start-studio.bat
+ *                           refreshes, so both keep working with no change.
+ *   node build.js --cloud   mode 'cloud' — the same frontend deployed on Cloudflare
+ *                           Workers in front of the shared D1 library. This is the only
+ *                           mode in which store.js / api.js / sync.js do anything: the
+ *                           public searchable library, GitHub sign-in to save or
+ *                           duplicate, IndexedDB-staged edits. `wrangler deploy` serves
+ *                           ./dist as static assets with worker/ handling /api/*.
  *
  *   dist/
  *     <web app files>     <- copied from tab-studio/web/
- *     config.js           <- generated: window.STUDIO_CONFIG = { mode: 'web' }
+ *     config.js           <- generated: window.STUDIO_CONFIG = { mode, libVersion }
  *     projects/           <- the project-library bundle (see below)
  *       index.json        <-   the library list (same shape as GET /api/projects)
  *       <id>.json         <-   each project (full project.json)
@@ -17,16 +27,32 @@
  *
  * The library is bundled from the committed projects/ folder — the SAME folder the
  * desktop backend reads and writes in place, so an edit made on desktop is exactly
- * what the web build ships.
+ * what the build ships. BOTH targets emit it: in cloud mode it is the FALLBACK library
+ * api.js (listSeedProjects / getSeedProject) and sync.js fall back to when D1 is
+ * unreachable or the database has not been seeded yet.
  * ========================================================================== */
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const ROOT = __dirname;
 const OUT = path.join(ROOT, 'dist');
 const WEB = path.join(ROOT, 'tab-studio', 'web');
 const PROJECTS = path.join(ROOT, 'projects');
+
+// 0. target. Unknown flags are FATAL rather than ignored: a silently-mistyped --cloud
+//    would produce a dist/ that looks right and is inert (mode 'web' turns off all
+//    three cloud modules), which is exactly the failure this flag exists to prevent.
+let MODE = 'web';
+for (const arg of process.argv.slice(2)) {
+  if (arg === '--cloud') MODE = 'cloud';
+  else if (arg === '--web') MODE = 'web';
+  else {
+    console.error('build.js: unknown argument "' + arg + '" (expected --cloud or --web)');
+    process.exit(1);
+  }
+}
 
 function copyDir(src, dst, filter) {
   fs.mkdirSync(dst, { recursive: true });
@@ -37,15 +63,35 @@ function copyDir(src, dst, filter) {
   }
 }
 
+// The build stamp api.js's libVersion() reads and hangs on every seed-library fetch as
+// ?v=<stamp>. Without it libVersion() falls back to the constant '0', the query string
+// never changes, and a returning visitor keeps whatever library an older build pinned
+// into the HTTP cache (those fetches used cache:'force-cache'). The git sha makes the
+// stamp identify the deploy; projects/ is edited IN PLACE by the desktop app and is
+// therefore often uncommitted, so a dirty tree appends the build time and the stamp
+// still moves.
+function buildStamp() {
+  const git = (args) => execFileSync('git', args, {
+    cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+  try {
+    const sha = git(['rev-parse', '--short=10', 'HEAD']);
+    const dirty = git(['status', '--porcelain', '--', 'tab-studio/web', 'projects']) !== '';
+    if (sha) return dirty ? sha + '.' + Date.now().toString(36) : sha;
+  } catch (e) { /* no git on PATH, not a repo, or an empty checkout — timestamp it is */ }
+  return Date.now().toString(36);
+}
+const STAMP = buildStamp();
+
 // 1. fresh dist/ + the web app
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
 copyDir(WEB, OUT);
 
-// 2. project-library bundle — the web build has no backend, so it ships the committed
-//    projects/ folder as a static read-only library: projects/<id>.json (full project)
-//    + projects/index.json (same shape as GET /api/projects). Only each project.json is
-//    read; the per-project audio (stems/, song.*) is left out of the web build.
+// 2. project-library bundle — projects/<id>.json (full project) + projects/index.json
+//    (same shape as GET /api/projects). Only each project.json is read; the per-project
+//    audio (stems/, song.*) is left out of every build. In 'web' this IS the library;
+//    in 'cloud' it is the offline / empty-database fallback.
 let projectCount = 0;
 if (fs.existsSync(PROJECTS)) {
   const outLib = path.join(OUT, 'projects');
@@ -61,7 +107,11 @@ if (fs.existsSync(PROJECTS)) {
     const tracks = meta.tracks || [];
     index.push({
       id: id, name: meta.name || id, updated: meta.updated || 0,
-      youtubeUrl: meta.youtubeUrl || '', hasSong: !!meta.song,
+      // hasSong describes what SHIPPED, not what the desktop project holds on disk:
+      // the audio bytes are deliberately excluded above, and browser playback is
+      // YouTube-only. Reading it off meta.song painted the library's "♪" badge
+      // (app.js:696) onto audio no visitor can ever hear.
+      youtubeUrl: meta.youtubeUrl || '', hasSong: false,
       instruments: tracks.map(t => t.instrument), trackCount: tracks.length,
     });
   }
@@ -70,9 +120,12 @@ if (fs.existsSync(PROJECTS)) {
   projectCount = index.length;
 }
 
-// 3. config.js — force web mode (overwrites the committed mode='desktop' default).
+// 3. config.js — force the build's mode (overwrites the committed mode='desktop'
+//    default) and stamp the build. The committed config.js runs after this line and
+//    only normalises .mode, so libVersion survives untouched.
 fs.writeFileSync(path.join(OUT, 'config.js'),
-  'window.STUDIO_CONFIG = { mode: "web" };\n' +
+  'window.STUDIO_CONFIG = { mode: ' + JSON.stringify(MODE) +
+  ', libVersion: ' + JSON.stringify(STAMP) + ' };\n' +
   fs.readFileSync(path.join(WEB, 'config.js'), 'utf8'));
 
 // 4. _headers (security + asset caching). Honored by both Pages and Workers static assets.
@@ -92,4 +145,4 @@ fs.writeFileSync(path.join(OUT, '_headers'),
 // not_found_handling in wrangler.jsonc (Workers); a single-page app needs nothing
 // extra on Pages.
 
-console.log('Built dist/  mode=web  projects=' + projectCount);
+console.log('Built dist/  mode=' + MODE + '  libVersion=' + STAMP + '  projects=' + projectCount);

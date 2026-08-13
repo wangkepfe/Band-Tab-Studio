@@ -1,13 +1,44 @@
 {
-  // Cloudflare Workers static-assets config (no Worker script — assets only).
-  // `name` MUST match the Worker created in the dashboard, or `wrangler deploy`
-  // targets a different Worker. build.js emits the site into ./dist.
-  "name": "band-tab-studio",
-  "compatibility_date": "2026-06-16",
-  "assets": {
-    "directory": "./dist",
-    // Serve index.html for unknown paths (single-page app). This replaces the
-    // `/* /index.html 200` _redirects rule, which Workers rejects as a loop.
-    "not_found_handling": "single-page-application"
-  }
+	// Cloudflare Workers static-assets config (no Worker script — assets only).
+	// `name` MUST match the Worker created in the dashboard, or `wrangler deploy`
+	// targets a different Worker. build.js emits the site into ./dist.
+	"name": "band-tab-studio",
+	"compatibility_date": "2026-06-16",
+	// nodejs_compat is required by better-auth (AsyncLocalStorage) — without it the
+	// auth handler throws at runtime, not at build time.
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "worker/index.js",
+	// Rebuild dist/ with the CLOUD target on every deploy. Without this, `wrangler
+	// deploy` uploads whatever dist/ happens to hold — and every other build entry
+	// point (npm run build, release-web.bat, start-studio.bat) runs `node build.js`
+	// with no flag, which emits mode:"web". That silently ships a frontend where
+	// store.js/api.js/sync.js are all inert: every API route answers correctly and
+	// nothing ever calls them, at HTTP 200, with no error anywhere.
+	"build": { "command": "node build.js --cloud" },
+	"assets": {
+		"directory": "./dist",
+		// Serve index.html for unknown paths (single-page app). This replaces the
+		// `/* /index.html 200` _redirects rule, which Workers rejects as a loop.
+		"not_found_handling": "single-page-application",
+		// The Worker reaches static assets through env.ASSETS for anything it does
+		// not handle itself.
+		"binding": "ASSETS",
+		// MUST be an ARRAY, never `true`. `true` routes every .css/.js asset hit
+		// through the Worker and burns the 100,000 req/day free budget on files
+		// that would otherwise bill zero. "/api" is listed alongside "/api/*"
+		// because the bare path does NOT match the wildcard and would otherwise be
+		// swallowed by the single-page-application fallback and answered with
+		// index.html at HTTP 200.
+		"run_worker_first": ["/api", "/api/*"]
+	},
+	// Binding name is what the Worker code reads: env.DB. Wrangler defaults it to the
+	// database name ("studio"); DB is the convention and keeps the code readable.
+	// The database itself is still named "studio" in the Cloudflare dashboard.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "studio",
+			"database_id": "ad4fa2d4-f235-4cdd-a80a-6aefb065d7c5"
+		}
+	]
 }

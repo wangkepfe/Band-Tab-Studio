@@ -9,7 +9,7 @@
  * transcription can be A/B'd against the source audio under one playhead.
  *
  *   Transport.init({ getProject, melodicSynth, drumSynth, audios, views,
- *                    getDrumDuration, onUpdate })
+ *                    getDrumDuration, onUpdate, onNotice })
  *   Transport.setView('pianoroll'|'basstab'|'drumtab')
  *   Transport.setSource('synth'|'original'|'stem')
  *   Transport.play()/pause()/stop()/toggle()/seekSeconds(t)/seekTick(t)
@@ -104,7 +104,11 @@ var Transport = (function () {
   }
   function durSeconds() {
     if (source === 'synth') return isMelodic() ? cfg.melodicSynth.durationTick() / tps() : drumDuration;
-    if (isYt()) return Math.max(0, yt().duration() + ytOffsetSec);
+    // YouTube reports 0 until the video's metadata lands (normally a beat after
+    // play()). Offsetting THAT would make durSeconds() equal posSeconds() on the
+    // first frame of any project with a positive offset, and frame()'s
+    // completion test would finalize playback instantly. Unknown stays 0.
+    if (isYt()) { var yd = yt().duration(); return yd > 0 ? Math.max(0, yd + ytOffsetSec) : 0; }
     var el = audioEl(); return (el && isFinite(el.duration)) ? el.duration : 0;
   }
 
@@ -123,6 +127,9 @@ var Transport = (function () {
   function emit() {
     if (cfg.onUpdate) cfg.onUpdate({ playing: running, posSec: posSeconds(), durationSec: durSeconds(), source: source, view: view });
   }
+  // The transport owns no DOM, so when it has to refuse an action it hands one
+  // line of text back up (app.js wires flash()). Optional — silent if unwired.
+  function notify(msg) { if (cfg && typeof cfg.onNotice === 'function') cfg.onNotice(msg); }
   function frame() {
     var sec = posSeconds();
     pushPlayhead(sec);
@@ -139,7 +146,27 @@ var Transport = (function () {
   // ---- public transport ----------------------------------------------------
   function play() {
     if (running) return;
-    if (!sourceAvailable(source)) { setSource('synth'); }
+    // The selected source can die between refreshes (a YouTube video that fails
+    // to load, an <audio> that loses its src). Falling back to the synth without
+    // a word is how that reads to the user as "the play button does nothing".
+    if (!sourceAvailable(source)) {
+      var was = source;
+      setSource('synth');
+      if (was !== 'synth') notify((was === 'original' ? 'Song' : 'Stem') + ' isn’t available — playing the transcription instead.');
+    }
+    // YouTube is the one engine that isn't playable the instant it's selected:
+    // the iframe API download + the player handshake take a beat, and a
+    // playVideo() issued before that lands is silently dropped. Starting the rAF
+    // loop anyway is what produced the frozen transport — pause glyph showing,
+    // playhead loop spinning, clock stuck at 0:00. Refusing the start also keeps
+    // playback inside the user's click: the old path left wantPlay set for
+    // onReady to act on later, outside any gesture, where autoplay policy kills
+    // it just as silently.
+    if (isYt() && !yt().isReady()) {
+      notify('Song is still loading — give YouTube a second, then press play.');
+      emit();                       // resync the button/clock; running stays false
+      return;
+    }
     if (metroOn) Metronome.prime();
     Metronome.reset();
     enginePlay();

@@ -19,10 +19,20 @@
 
   var currentView = 'pianoroll';
   var drumData = null;   // mirror of the active drum track for the drum tab
-  // 'web' = the static build: offline editor + bundled starter projects, no
-  // backend (no AI; projects persist as local .studio.json files). 'desktop' =
-  // full app served by the local backend (AI pipeline + on-disk project library).
-  var WEB = !!(window.STUDIO_CONFIG && window.STUDIO_CONFIG.mode === 'web');
+  // Three modes. 'desktop' = full app served by the local FastAPI backend (AI
+  // pipeline + on-disk project library). 'web' = the static offline build: editor
+  // + bundled starter projects, projects persist as local .studio.json files.
+  // 'cloud' = the hosted build: same editor, but projects live in D1 behind the
+  // Worker, with GitHub sign-in, forking and cross-device sync.
+  //
+  // WEB deliberately means "there is NO local FastAPI backend", which is true for
+  // both 'web' and 'cloud'. All 13 existing WEB read sites keep that meaning and
+  // stay correct; only the handful of places that must diverge test CLOUD.
+  // Do NOT redefine WEB as (mode === 'web') — app.js:492 relies on it to keep
+  // doSave() the sole writer of projects/<id>/project.json on desktop.
+  var MODE = (window.STUDIO_CONFIG && window.STUDIO_CONFIG.mode) || 'desktop';
+  var CLOUD = (MODE === 'cloud');
+  var WEB = (MODE !== 'desktop');
 
   /* ---- instrument targets ---- */
   var TARGETS = {
@@ -125,6 +135,18 @@
   /* ---- synth + transport ---- */
   EditorPlayer.configure({ getProject: function () { return roll.getProject(); }, setPlayhead: function () { }, onState: function () { } });
   YouTubePlayer.mount('ytPlayer');
+  // In cloud mode YouTube is the ONLY playback source, so a dead video has to say so.
+  // Without this, a deleted/private/region-blocked/embed-disabled video leaves the
+  // Song button enabled, the clock at 0:00 and the transport spinning forever.
+  // flash() and refreshSrcButtons() are hoisted declarations in this IIFE, so the
+  // forward reference is safe.
+  YouTubePlayer.setOnFail(function (msg) {
+    flash(msg);
+    if (YouTubePlayer.hasVideo()) return;
+    $('ytTitle').textContent = 'YouTube — unavailable';
+    $('ytPanel').style.display = 'none';
+    refreshSrcButtons();
+  });
   Transport.init({
     getProject: function () { return roll.getProject(); },
     melodicSynth: EditorPlayer, drumSynth: DrumSynth,
@@ -137,7 +159,10 @@
       guitarchords: { setPlayheadTick: function (t) { guitarChords.setPlayheadTick(t); } },
       drumtab: { setPlayheadSeconds: function (s) { drumRoll.setPlayhead(s); updateDrumSheetPlayhead(s); } }
     },
-    onUpdate: onTransport
+    onUpdate: onTransport,
+    // Transport refuses to start when the YouTube player isn't ready yet; without a
+    // notice channel that refusal is silent and reads as a dead play button.
+    onNotice: flash
   });
   function onTransport(st) {
     $('btnPlay').textContent = st.playing ? '⏸' : '▶';
@@ -464,12 +489,21 @@
 
   /* ====================== persistence ====================== */
   var saveTimer = null, loading = false, dirty = false, pendingUploads = 0;
+  // Set by sync.js immediately before it navigates to GitHub for OAuth. Without it
+  // the beforeunload guard below raises "Leave site? Changes you may have made will
+  // not be saved" at the exact moment we are sending the user to sign in — which is
+  // how people abandon the login believing they lost their work. The edit is already
+  // committed to IndexedDB by then; the navigation is deliberate, not a loss.
+  var suppressUnload = false;
   function markSave(s) { var e = $('saveStatus'); if (e) e.textContent = s; }
   // `loading` suppresses saves during programmatic track/project loads (so merely
   // browsing tracks or opening a project doesn't dirty/re-PUT it).
   function scheduleSave() {
     if (loading) return;
     dirty = true;
+    // cloud: hand off to sync.js, which commits to IndexedDB first (durable before
+    // the network) and then drains lazily. noteEdit() is synchronous.
+    if (CLOUD) { markSave('•'); StudioSync.noteEdit(); return; }
     // web build has no backend: edits live in memory and persist via "Save file".
     if (WEB) { markSave('edited — Save file'); return; }
     if (!project.id) { markSave('unsaved'); return; }
@@ -526,7 +560,10 @@
   }
 
   function projectHasContent() { return !!(project.song || Object.keys(project.tracks).length); }
-  function confirmDiscard() { return !(dirty && projectHasContent()) || confirm('Discard unsaved changes to the current project?'); }
+  // In cloud mode a dirty document is already committed to IndexedDB and re-openable
+  // from the "On this device" drafts section, so the discard prompt is simply untrue —
+  // and clicking Cancel would block the user from opening anything at all.
+  function confirmDiscard() { if (CLOUD) return true; return !(dirty && projectHasContent()) || confirm('Discard unsaved changes to the current project?'); }
   // Returns true if it actually reset; false if the user cancelled the discard
   // prompt — silent callers must bail on false or they'd clobber (and auto-save
   // over) the project the user chose to keep.
@@ -544,6 +581,10 @@
     return true;
   }
   function saveProject() {
+    // MUST come before the WEB branch: WEB is true in cloud mode, so the other order
+    // turns every cloud save into a file download. requestSave() decides create vs
+    // save-in-place vs fork vs sign-in gate on its own.
+    if (CLOUD) { StudioSync.requestSave(); return; }
     if (WEB) { saveProjectToFile(); return; }
     if (project.id) { scheduleSaveNow(); return; }
     project.name = ($('projName').value || '').trim() || defaultName();
@@ -569,7 +610,11 @@
     serializeActive();
     project.name = ($('projName').value || '').trim() || defaultName();
     $('projName').value = project.name;
-    if (!project.id) project.id = 'proj-' + Math.random().toString(36).slice(2, 10);
+    // Never fabricate an id in cloud mode: ids are server-minted there, and writing a
+    // made-up one into the live model would make sync push against a nonexistent
+    // project. "Save file" stays reachable as the export escape hatch for users whose
+    // IndexedDB is unavailable (private-mode Safari), where sign-in is refused.
+    if (!CLOUD && !project.id) project.id = 'proj-' + Math.random().toString(36).slice(2, 10);
     var safe = project.name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'project';
     download(new TextEncoder().encode(JSON.stringify(serializeMeta())), safe + '.studio.json', 'application/json');
     dirty = false; markSave('saved to file'); flash('Saved to file: ' + safe + '.studio.json');
@@ -581,6 +626,9 @@
   function openProject(id) {
     if (!confirmDiscard()) return;
     clearTimeout(saveTimer);
+    // openProject accepts BOTH a server project id and a 'local_<hex>' draft key, so
+    // library cards of either kind pass straight through.
+    if (CLOUD) { StudioSync.openProject(id); return; }
     if (WEB) {
       // web build: the library is the static projects/ bundle (read-only here).
       // Opened projects are editable in memory and saved back via "Save file".
@@ -646,12 +694,25 @@
         if (!meta || !Array.isArray(meta.tracks)) throw new Error('not a project file');
         clearTimeout(saveTimer);
         loadProjectMeta(meta, null);
+        // An imported file carries a foreign meta.id. Without this, sync would still
+        // be pointed at whatever project was open and the first edit to the import
+        // would push over it.
+        if (CLOUD) StudioSync.requestNew();
       } catch (e) { flash('Could not read project file: ' + e.message); }
     };
     r.readAsText(file);
   }
   function deleteProject(id) {
-    fetch('/api/projects/' + id, { method: 'DELETE' }).then(function () {
+    if (CLOUD) {
+      return StudioApi.deleteProject(id).then(function () {
+        if (project.id === id) StudioSync.requestNew();
+        fetchProjects();
+      }, function (e) { flash('Could not delete: ' + e.message); });
+    }
+    // NB: the desktop path never checked r.ok, so a 404 read as success and the row
+    // reappeared on the next refresh.
+    fetch('/api/projects/' + id, { method: 'DELETE' }).then(function (r) {
+      if (!r.ok) throw new Error('delete failed');
       if (project.id === id) newProject();
       fetchProjects();
     }).catch(function () { flash('Could not delete project.'); });
@@ -668,7 +729,19 @@
   // with HTTP 200 for a MISSING file — so a 200 alone doesn't mean it exists.
   // Reject HTML so a not-deployed bundle fails clearly instead of as JSON garbage.
   function isHtml(r) { return /text\/html/i.test(r.headers.get('content-type') || ''); }
+  var libMine = false;   // "My projects" filter (cloud only)
   function fetchProjects() {
+    // cloud: the library is D1 — every project is public, search runs server-side,
+    // and the default order is this user's most-recently-viewed. Drafts held only on
+    // this device are prepended by listLibrary().
+    if (CLOUD) {
+      var opts = { order: 'recent', q: ($('libSearch').value || '').trim() };
+      if (libMine && StudioSync.user()) opts.mine = 1;   // the Worker 400s on mine=1 while anonymous
+      StudioSync.listLibrary(opts).then(function (page) {
+        libProjects = (page && page.projects) || []; libLoaded = true; renderLibrary();
+      }, function () { libProjects = []; libLoaded = true; renderLibrary(); });
+      return;
+    }
     var url = WEB ? 'projects/index.json' : '/api/projects';
     fetch(url, { cache: WEB ? 'force-cache' : 'no-store' }).then(function (r) { return (r.ok && !isHtml(r)) ? r.json() : { projects: [] }; })
       .then(function (j) { libProjects = (j && j.projects) || []; libLoaded = true; renderLibrary(); })
@@ -677,10 +750,13 @@
   function renderLibrary() {
     var q = ($('libSearch').value || '').toLowerCase().trim();
     var list = $('libList'); list.innerHTML = '';
-    var items = libProjects.filter(function (p) { return !q || (p.name || '').toLowerCase().indexOf(q) >= 0; });
+    // cloud searches server-side, so filtering again here would double-filter the page
+    // against a stale input and hide rows the server already matched.
+    var items = CLOUD ? libProjects : libProjects.filter(function (p) { return !q || (p.name || '').toLowerCase().indexOf(q) >= 0; });
     if (!items.length) {
       var emptyMsg = !libLoaded ? 'Loading…'
         : libProjects.length ? 'No projects match.'
+        : CLOUD ? (q ? 'No projects match.' : libMine ? 'You have no projects yet — open any project and edit it to make a copy.' : 'No projects yet.')
         : WEB ? 'No projects bundled.'
         : 'No saved projects yet — load a song, extract a track, then Save.';
       show($('libEmpty'), !!emptyMsg); $('libEmpty').textContent = emptyMsg;
@@ -695,19 +771,70 @@
       var insts = (p.instruments || []).filter(Boolean);
       meta.textContent = (insts.length ? insts.join(' · ') : 'empty') + (p.hasSong ? '  ·  ♪' : '') + (p.youtubeUrl ? '  ·  YT' : '') + '  ·  ' + fmtDate(p.updated);
       open.appendChild(nm); open.appendChild(meta);
+      // Every project is public, so say whose it is — and mark the ones that exist
+      // only in this browser, because those are the ones that can be lost.
+      if (CLOUD) {
+        var tag = document.createElement('span'); tag.className = 'lib-badge';
+        if (p.draft) { tag.textContent = 'on this device'; tag.classList.add('draft'); }
+        else if (p.isMine) { tag.textContent = 'mine'; tag.classList.add('mine'); }
+        else if (p.ownerName) { tag.textContent = p.ownerName; }
+        if (tag.textContent) open.appendChild(tag);
+      }
       open.onclick = function () { openProject(p.id); };
       row.appendChild(open);
       // Delete only applies to the desktop backend's library; the web build's list is
       // read-only (open + edit + Save file instead).
-      if (!WEB) {
+      // Desktop: every row is deletable. Cloud: only rows you own (R4) — canEdit is
+      // supplied by the server and is also true for admin.
+      if (!WEB || (CLOUD && (p.canEdit || p.draft))) {
         var del = document.createElement('button'); del.className = 'lib-del'; del.textContent = '🗑'; del.title = 'Delete project';
-        del.onclick = function (e) { e.stopPropagation(); if (confirm('Delete project "' + (p.name || 'Untitled') + '"? This removes its saved audio + tracks.')) deleteProject(p.id); };
+        del.onclick = function (e) {
+          e.stopPropagation();
+          if (!confirm('Delete project "' + (p.name || 'Untitled') + '"?')) return;
+          if (CLOUD && p.draft) { StudioSync.discardDraft(p.id).then(fetchProjects); return; }
+          deleteProject(p.id);
+        };
         row.appendChild(del);
       }
       list.appendChild(row);
     });
   }
   function fmtDate(t) { if (!t) return '—'; try { return new Date(t * 1000).toLocaleString(); } catch (e) { return '—'; } }
+
+  /* ---- cloud auth UI ------------------------------------------------------
+   * Called at boot and on every sync state change. Everything is built with
+   * textContent, never innerHTML: all projects are public, so owner names are
+   * attacker-supplied strings rendered in other people's browsers.
+   * ----------------------------------------------------------------------- */
+  function renderAuthUI() {
+    if (!CLOUD) return;
+    var slot = $('authSlot'); if (!slot) return;
+    var u = (window.StudioSync && StudioSync.user) ? StudioSync.user() : null;
+    slot.innerHTML = '';
+    if (u) {
+      if (u.image) {
+        var img = document.createElement('img'); img.className = 'avatar';
+        img.src = u.image; img.alt = ''; img.width = 20; img.height = 20;
+        slot.appendChild(img);
+      }
+      var who = document.createElement('span'); who.className = 'who';
+      who.textContent = u.name || 'signed in';
+      if (u.isAdmin) who.title = 'admin';
+      slot.appendChild(who);
+      var out = document.createElement('button'); out.className = 'btn sm'; out.textContent = 'Sign out';
+      out.onclick = function () { StudioSync.signOut(); };
+      slot.appendChild(out);
+    } else {
+      var inb = document.createElement('button'); inb.className = 'btn sm';
+      inb.textContent = 'Sign in with GitHub';
+      inb.title = 'Needed to duplicate or save a project. Browsing and editing work without it.';
+      inb.onclick = function () { StudioSync.signIn(); };
+      slot.appendChild(inb);
+    }
+    // "My projects" is meaningless — and rejected by the Worker — while logged out.
+    var mw = $('libMineWrap'); if (mw) mw.style.display = u ? '' : 'none';
+    if (!u && libMine) { libMine = false; var mc = $('libMine'); if (mc) mc.checked = false; }
+  }
 
   /* ====================== transport UI ====================== */
   $('btnPlay').onclick = function () { Transport.toggle(); };
@@ -1027,17 +1154,39 @@
   }
 
   /* ====================== header / global toolbar ====================== */
-  $('btnNewProj').onclick = newProject;
+  // Route through sync so it drops the previous serverId. Without that, the first
+  // edit on the new blank document would push it over the project that was open.
+  $('btnNewProj').onclick = function () { if (newProject() === false) return; if (CLOUD) StudioSync.requestNew(); };
   $('btnSaveProj').onclick = saveProject;
   $('btnOpenFile').onclick = function () { $('projFileInput').click(); };
   $('projFileInput').addEventListener('change', function (e) { if (e.target.files[0]) { openProjectFromFile(e.target.files[0]); e.target.value = ''; } });
   $('btnLibrary').onclick = openLibrary;
-  // In the backend-less web build, "Save" downloads the project as a file.
-  if (WEB) { $('btnSaveProj').textContent = 'Save file'; $('btnSaveProj').title = 'Download this project as a .studio.json file'; }
+  // Duplicate is the only way a non-author keeps their changes (R4), and it requires
+  // sign-in (R1) — requestDuplicate() raises the gate itself when logged out.
+  if ($('btnDuplicate')) $('btnDuplicate').onclick = function () { if (CLOUD) StudioSync.requestDuplicate(); };
+  if ($('libMine')) $('libMine').addEventListener('change', function () { libMine = !!this.checked; fetchProjects(); });
+  // In the backend-less web build, "Save" downloads the project as a file. In cloud
+  // mode Save means save-to-your-account, so keep the plain label there.
+  if (WEB && !CLOUD) { $('btnSaveProj').textContent = 'Save file'; $('btnSaveProj').title = 'Download this project as a .studio.json file'; }
+  if (CLOUD) { $('btnSaveProj').title = 'Save to your account — sign in with GitHub if you haven\'t'; }
   $('libClose').onclick = closeLibrary;
   $('libOverlay').addEventListener('click', function (e) { if (e.target === this) closeLibrary(); });
-  $('libSearch').addEventListener('input', renderLibrary);
-  $('projName').addEventListener('change', function () { project.name = (this.value || '').trim() || defaultName(); this.value = project.name; scheduleSave(); });
+  // cloud search runs server-side, so re-query (debounced) instead of just
+  // re-filtering the page already in hand.
+  var libSearchTimer = null;
+  $('libSearch').addEventListener('input', function () {
+    if (!CLOUD) { renderLibrary(); return; }
+    clearTimeout(libSearchTimer);
+    libSearchTimer = setTimeout(fetchProjects, 250);
+  });
+  $('projName').addEventListener('change', function () {
+    project.name = (this.value || '').trim() || defaultName(); this.value = project.name;
+    // A rename is metadata only — requestRename PATCHes it without re-uploading the
+    // whole payload, and falls back to a normal edit when the doc is dirty or the
+    // user isn't the author.
+    if (CLOUD) { StudioSync.requestRename(project.name); return; }
+    scheduleSave();
+  });
   $('btnOpenMidi').onclick = function () { $('midiInput').click(); };
   // MIDI import is client-side, so it's wired here (works in both web + desktop;
   // the workflow source-bar drop zone is desktop-only).
@@ -1132,7 +1281,14 @@
 
   $('targetSel').addEventListener('change', applyTarget);
   $('ftChk').addEventListener('change', function () { });
-  $('ytUrl').addEventListener('change', function () { project.youtubeUrl = (this.value || '').trim(); scheduleSave(); });
+  // Load the pasted link immediately when there is no local audio (web + cloud). In
+  // cloud mode YouTube is the ONLY playback source, so without this the Song source
+  // stays dead until reload and none of youtube.js's failure reporting can fire.
+  $('ytUrl').addEventListener('change', function () {
+    project.youtubeUrl = (this.value || '').trim();
+    if (WEB) setSongYouTube(project.youtubeUrl);
+    scheduleSave();
+  });
 
   // youtube offset — one project-level sync delay for the YouTube "Song" audio,
   // shown next to the bar "offset" in every melodic tab toolbar. All three inputs
@@ -1217,15 +1373,47 @@
     setTimeout(function () { try { w.print(); } catch (e) {} }, 250);
   }
 
-  window.addEventListener('beforeunload', function (e) { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', function (e) { if (dirty && !suppressUnload) { e.preventDefault(); e.returnValue = ''; } });
 
   /* ---- init ---- */
-  if (WEB) document.body.classList.add('mode-web');   // CSS hides .desktop-only
+  if (WEB) document.body.classList.add('mode-web');       // CSS hides .desktop-only
+  if (CLOUD) document.body.classList.add('mode-cloud');   // CSS shows the cloud-only bits
   roll.setGridTicks(gridTicks());
   setToolUI('select'); dToolUI('select');
   applyTarget(); updateViewAvailability('bass');
   updateStats(); refreshSrcButtons(); renderTracks();
   setView('pianoroll');
+
+  /* ---- cloud boot ----------------------------------------------------------
+   * Everything in sync.js is inert until init() runs, so this chain is what makes
+   * the whole cloud product exist. resume() MUST run before the library first
+   * renders: it owns the ?resume=<draftKey> return from the OAuth round trip (the
+   * page navigated away to GitHub and came back — this is where the user's
+   * in-progress edit is reclaimed) as well as ?p=<projectId> deep links.
+   * init() is synchronous and returns undefined; resume() returns a promise.
+   * ------------------------------------------------------------------------ */
+  if (CLOUD) {
+    StudioStore.ready().then(function () {
+      StudioSync.init({
+        serializeMeta:   serializeMeta,
+        serializeActive: serializeActive,
+        loadProjectMeta: loadProjectMeta,
+        setProjectId:    function (id) { project.id = id; },
+        getProjectId:    function () { return project.id; },
+        getName:         function () { return ($('projName').value || '').trim() || project.name; },
+        setName:         function (n) { project.name = n; $('projName').value = n; },
+        markSave:        markSave,
+        flash:           flash,
+        setDirty:        function (b) { dirty = !!b; },
+        onState:         renderAuthUI,
+        suppressUnload:  function (b) { suppressUnload = !!b; }
+      });
+      renderAuthUI();
+      return StudioSync.resume();
+    }).then(function () { renderAuthUI(); }, function (e) {
+      flash('Cloud sync unavailable: ' + (e && e.message ? e.message : 'unknown error'));
+    });
+  }
 
   // debug/automation handle
   window.Studio = {

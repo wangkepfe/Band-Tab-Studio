@@ -4,6 +4,15 @@ Thumbs.db
 *.log
 .claude/
 .vscode/
+# secrets — NEVER commit. .dev.vars is wrangler's local-dev secret file and holds
+# the OAuth client secret + session-signing key. The deployed copies live in
+# Cloudflare via `wrangler secret put` and exist nowhere in this repo.
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+# wrangler local state (local D1 sqlite, build cache) — regenerated
+.wrangler/
 # python backend
 tab-studio/server/.venv/
 __pycache__/
