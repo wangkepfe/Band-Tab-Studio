@@ -656,23 +656,42 @@ var StudioSync = (function () {
       var q = (opts.q || '').toLowerCase().trim();
       var keep = drafts.filter(function (d) { return !q || (d.name || '').toLowerCase().indexOf(q) >= 0; });
       page.drafts = keep;
-      page.projects = keep.concat(page.projects || []);
+      // A draft that shadows a server project (unsent edits to something already in
+      // the library) must REPLACE that row, not sit next to it — otherwise the user
+      // sees the same project twice and the stale server copy is the one on top.
+      var shadowed = {};
+      keep.forEach(function (d) { if (d.shadowsId) shadowed[d.shadowsId] = 1; });
+      var rest = (page.projects || []).filter(function (p) { return !shadowed[p.id]; });
+      page.projects = keep.concat(rest);
       return page;
     }, function () { return page; });
   }
-  // Cards for documents that exist ONLY on this device (never saved to the cloud).
-  // Their `id` is the draft key, which openProject() routes back to openDraft().
+  // Cards for UNSENT local work. Their `id` is the draft key, which openProject()
+  // routes back to openDraft().
+  //
+  // Two kinds qualify, and missing the second one is what made a logged-out edit
+  // look like lost work:
+  //   1. no serverId  — a document that has never been saved anywhere.
+  //   2. serverId + dirty — edits to an existing project that have not been pushed.
+  //      This is EVERY anonymous edit: opening a public project stamps the source's
+  //      id onto the local record, so filtering on `!r.serverId` alone hid them.
+  //      The bytes were always safe in IndexedDB; they were just unreachable from
+  //      the library, which to a user is indistinguishable from losing them.
+  // A record with a serverId and dirty=false is a clean cached copy of a project
+  // that is already in the list on its own — including it would just duplicate it.
   function listDrafts() {
     if (!hasStore) return Promise.resolve([]);
     return StudioStore.listDocs().then(function (recs) {
-      return (recs || []).filter(function (r) { return r && !r.serverId; }).map(function (r) {
+      return (recs || []).filter(function (r) { return r && (!r.serverId || r.dirty); }).map(function (r) {
         var f = StudioApi.metaFacts(r.doc || {});
         return {
           id: r.key, name: r.name || 'Untitled', updated: r.updated || 0, created: r.updated || 0,
           youtubeUrl: f.youtubeUrl, hasSong: !!f.hasSong,
           instruments: f.instruments ? f.instruments.split(',') : [], trackCount: f.trackCount,
           version: 0, ownerId: null, ownerName: 'on this device', ownerImage: '',
-          isMine: true, canEdit: true, forkOf: null, forkRoot: null, viewedAt: null, draft: true
+          isMine: true, canEdit: true, forkOf: null, forkRoot: null, viewedAt: null, draft: true,
+          // the server row this draft supersedes, so withDrafts() can drop the duplicate
+          shadowsId: r.serverId || null
         };
       });
     }, function () { return []; });
