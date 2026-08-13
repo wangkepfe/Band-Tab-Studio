@@ -31,10 +31,14 @@
  * ========================================================================== */
 import {
   MAX_PAYLOAD_CHARS,
+  MAX_DETAIL_CHARS,
   VIEW_FLOOR_SEC,
   isB64,
   isFlatId,
   toCard,
+  toEarSession,
+  insertEarSession,
+  listEarSessions,
   getProject,
   getProjectExists,
   listProjects,
@@ -80,6 +84,53 @@ const MAX_UNIX_SECONDS = 4102444800;   // 2100-01-01, the import header clamp
 
 const ENCODINGS = { 'gzip+b64': 1, 'identity+b64': 1 };
 
+/* --- /learn (ear trainer) limits -------------------------------------------
+ *
+ * The POST body is the ONE JSON body in this file that is not a few dozen
+ * bytes, because it carries `detail`. The arithmetic for its cap: 2,000
+ * characters of detail (db.js MAX_DETAIL_CHARS), doubled to 4,000 in the worst
+ * case where the client sends it as a JSON *string* and every character needs
+ * escaping, plus ~300 characters for the thirteen scalar fields and their keys.
+ * 8,192 is ~2x that. MAX_JSON_BODY (4,096) would reject a legitimate maximal
+ * session, which is why readJsonBody() now takes a per-route cap. */
+const MAX_LEARN_BODY = 8192;
+const DEFAULT_LEARN_LIMIT = 60;  // what the /learn client asks for
+const MAX_LEARN_LIMIT = 100;     // db.js MAX_EAR_LIMIT; see its response-size note
+
+/* Enum domains, as ARRAYS rather than lookup objects on purpose: a bare object
+ * literal inherits Object.prototype, so `LEARN_MODES['constructor']` would be
+ * truthy and a client could smuggle a non-value past an `if (map[v])` test.
+ * Three-element indexOf is also faster than the property lookup it replaces. */
+const LEARN_MODES = ['identify', 'produce'];
+const LEARN_CONTEXTS = ['cadence', 'ii-V-I', 'drone'];
+const LEARN_TAPERS = [0, 1, 2, 4, 8];      // questions between key re-statements
+
+const MAX_LEARN_DURATION = 86400;   // 24 h; 'endless' mode in a forgotten tab
+const MAX_LEARN_QUESTIONS = 10000;  // ~7 s/question for 20 straight hours
+const MAX_LEARN_ASSISTS = 100000;   // NOT bounded by questions: one trial can be
+                                    // replayed repeatedly (design Part I s4)
+const MAX_ABS_CENTS = 1200;         // one octave of |deviation| per mic trial
+
+/* HOW FAR `started` MAY SIT FROM THE SERVER'S CLOCK. It is the CLIENT's clock
+ * (the session is written to localStorage first and POSTed after, design Part I
+ * s13), so it has to be accepted with some slack and refused past it:
+ *  · FUTURE 1 day — a machine whose clock is a few hours fast is common; a
+ *    session that claims to be from next year would sort above every real row
+ *    in the list forever, and no later correct row could displace it.
+ *  · PAST 365 days — the sync path replays sessions that were saved offline,
+ *    which can legitimately be weeks old. Beyond a year it is a broken clock
+ *    (or a millisecond value divided by something), not a backlog.
+ * REJECTED rather than silently clamped to ctx.now: clamping a batch of replayed
+ * offline sessions would collapse them all onto the same second and turn them
+ * into PK collisions — which db.js would then resolve by walking `started`
+ * forward, inventing a practice history that never happened. */
+const LEARN_FUTURE_SEC = 86400;
+const LEARN_PAST_SEC = 31536000;
+
+/* A day counts toward the streak when it holds at least this much practice —
+ * design Part I s8, "streak of consecutive days with >= 5 minutes". */
+const LEARN_STREAK_MIN_SEC = 300;
+
 /* PER-USER WRITE BRAKES. Isolate-local and free — a D1 counter would BE a write
  * on the path we are bounding. Not security controls (the real cost of abuse is
  * that an account needs a GitHub OAuth round trip, and an attacker spread across
@@ -94,11 +145,15 @@ const ENCODINGS = { 'gzip+b64': 1, 'identity+b64': 1 };
  *   save (PUT)   30/min, 600/hour  x 2 rows = 28,800/day   (29% of cap)
  *   rename PATCH 10/min, 120/hour  x 2 rows =  5,760/day   (5.8% of cap)
  *   view POST            60/hour   x 1 row  =  1,440/day   (1.4% of cap)
+ *   learn POST   10/min, 60/hour   x 1 row  =  1,440/day   (1.4% of cap)
  *
  * The hourly figures are the binding ones and they are set ABOVE what a human
  * can produce: the client autosaves behind a 10 s floor, so an hour of unbroken
- * editing is ~360 saves; a rename is a typed field; a view is a project open.
- * The per-minute figures only smooth bursts.
+ * editing is ~360 saves; a rename is a typed field; a view is a project open;
+ * a learn session is TEN MINUTES of practice, so 60/hour is already six times
+ * what the drill itself can generate. The per-minute figures only smooth bursts
+ * — for /learn, the burst that matters is the offline backlog EarStore replays
+ * on the first sign-in after a week away.
  *
  * These sit ALONGSIDE the per-project floors (SAVE_FLOOR_SEC on PUT and PATCH,
  * VIEW_FLOOR_SEC in the recent_views upsert). The floors bound one row being
@@ -111,6 +166,8 @@ const SAVE_PER_HOUR = 600;
 const RENAME_PER_MIN = 10;
 const RENAME_PER_HOUR = 120;
 const VIEW_PER_HOUR = 60;
+const LEARN_PER_MIN = 10;
+const LEARN_PER_HOUR = 60;
 
 /* ---------------------------------------------------------------------------
  * isolate-local rate limiter
@@ -159,6 +216,22 @@ function guardRenameRate(ctx, userId) {
   if (!rateLimit('rm:' + userId, RENAME_PER_MIN, 60, ctx.now) ||
       !rateLimit('rh:' + userId, RENAME_PER_HOUR, 3600, ctx.now)) {
     throw new HttpError(429, 'rate_limited', { retryAfter: 60, detail: 'renaming too fast' });
+  }
+}
+
+/* POST /api/learn/sessions writes 1 row and has no per-row floor to fall back
+ * on — every session is a NEW primary key, so there is no equivalent of
+ * SAVE_FLOOR_SEC or the recent_views ON CONFLICT floor to bound a client that
+ * loops. This IS the only brake on that path, which is why it exists even
+ * though the ceiling is six times what the drill can produce.
+ *
+ * The bucket keys ('lm:', 'lh:') are distinct from the create ('cm:'/'ch:'),
+ * save ('sm:'/'sh:'), rename ('rm:'/'rh:') and view ('vw:') prefixes, so a
+ * user's practice log and their saves never spend each other's budget. */
+function guardLearnRate(ctx, userId) {
+  if (!rateLimit('lm:' + userId, LEARN_PER_MIN, 60, ctx.now) ||
+      !rateLimit('lh:' + userId, LEARN_PER_HOUR, 3600, ctx.now)) {
+    throw new HttpError(429, 'rate_limited', { retryAfter: 60, detail: 'too many practice sessions' });
   }
 }
 
@@ -397,7 +470,13 @@ function bytesFromB64(b64) {
   return Math.max(0, ((n / 4) | 0) * 3 - pad);
 }
 
-async function readJsonBody(request) {
+/* `maxChars` is the PER-ROUTE cap, defaulting to MAX_JSON_BODY. Only
+ * POST /learn/sessions passes one: its body carries the per-degree `detail`
+ * blob and so is kilobytes rather than the few dozen bytes PATCH and transfer
+ * send. Raising MAX_JSON_BODY itself would have widened the buffer every route
+ * accepts in order to serve one of them. */
+async function readJsonBody(request, maxChars) {
+  const cap = (typeof maxChars === 'number' && maxChars > 0) ? maxChars : MAX_JSON_BODY;
   // Same rule as readPayload, same reason: without a declared length, the
   // `txt.length` test below only runs AFTER the whole body has been buffered
   // into a string. These routes (PATCH rename, admin transfer) carry a few dozen
@@ -409,14 +488,14 @@ async function readJsonBody(request) {
       detail: 'this route requires a single, numeric Content-Length (no chunked bodies)'
     });
   }
-  if (declared > MAX_JSON_BODY) throw bad('body too large for this route');
+  if (declared > cap) throw bad('body too large for this route');
   let txt;
   try {
     txt = await request.text();
   } catch (e) {
     throw bad('could not read the request body');
   }
-  if (txt.length > MAX_JSON_BODY) throw bad('body too large for this route');
+  if (txt.length > cap) throw bad('body too large for this route');
   let obj;
   try {
     obj = JSON.parse(txt);
@@ -1015,6 +1094,253 @@ export async function viewRoute(request, ctx) {
 }
 
 /* ===========================================================================
+ * /learn — the ear trainer's practice log (design Part I s13/s14).
+ *
+ * THE CLOUD COPY IS ADDITIVE, and that shapes both routes. Every completed
+ * session is already in the browser's localStorage before either of these is
+ * called; the POST is a best-effort backup the client retries on next load, and
+ * a failure here is never something the user is shown. So: no idempotency key
+ * (the primary key IS one — a replayed POST of the same session collides on
+ * (user_id, started) and gets a 409 instead of a duplicate row), no ETag (rows
+ * are immutable; there is nothing to revalidate), and no PATCH or DELETE at all
+ * (a practice session is a fact that happened, not a document).
+ *
+ * THE BODY IS JSON HERE, unlike every other write in this file. That is not a
+ * departure from house rule 1 — the payload stays opaque, it is just small
+ * enough to model as fields: thirteen scalars the server must bound, plus one
+ * `detail` string it never parses. The projects payload is 80 KB of base64 that
+ * would cost more CPU to escape than to store; this is under 8 KB and every
+ * field of it is a number the CHECK constraints care about.
+ * ======================================================================== */
+
+/* --- field validators. Every one of them throws bad(detail, field), so a
+ * malformed session tells the client exactly which field it got wrong instead
+ * of a blanket 400 or (worse) a CHECK-constraint 500 three layers down. ---- */
+
+/** Strict: a JSON number that is an integer, in range. NOT parseInt on a
+ *  string — the client is ours and sends JSON numbers, and accepting "12abc"
+ *  here is how a typo becomes a silently truncated statistic. */
+function learnInt(body, field, min, max) {
+  const v = body[field];
+  if (typeof v !== 'number' || !isFinite(v) || Math.floor(v) !== v) {
+    throw bad('expected an integer', field);
+  }
+  if (v < min || v > max) throw bad('out of range [' + min + ', ' + max + ']', field);
+  return v;
+}
+
+/** 0/1 on the wire (design Part I s13 spells singGate as 0|1), but a real
+ *  boolean is accepted too: JSON.stringify of a JS `false` is the single most
+ *  likely client-side accident and rejecting it would buy nothing. */
+function learnBool(body, field) {
+  const v = body[field];
+  if (v === 0 || v === false) return 0;
+  if (v === 1 || v === true) return 1;
+  throw bad('expected 0 or 1', field);
+}
+
+function learnEnum(body, field, allowed) {
+  const v = body[field];
+  if (typeof v !== 'string' || allowed.indexOf(v) < 0) {
+    throw bad("expected one of '" + allowed.join("', '") + "'", field);
+  }
+  return v;
+}
+
+/**
+ * `detail` — the per-degree tally. STORED AS OPAQUE TEXT and never parsed by
+ * the Worker (house rule 1), so what we validate is its TYPE and its LENGTH,
+ * nothing about its shape.
+ *
+ * A string and a plain object are both accepted, and the object is serialized
+ * here. That is deliberate rather than sloppy: the client's record carries
+ * `detail` as compact JSON, and whether it arrives pre-stringified or as a
+ * nested object depends on how EarStore hands it to Api.learnSaveSession —
+ * a detail of the client that must not be able to produce a 400. Either way
+ * exactly one string reaches D1, and it is the string that comes back out.
+ * (JSON.parse produced this value, so it cannot be circular and stringify
+ * cannot throw.)
+ */
+function learnDetail(body) {
+  const v = body.detail;
+  if (v === undefined || v === null) return '';
+  let s;
+  if (typeof v === 'string') s = v;
+  else if (typeof v === 'object' && !Array.isArray(v)) s = JSON.stringify(v);
+  else throw bad('expected a JSON string or object', 'detail');
+  if (s.length > MAX_DETAIL_CHARS) {
+    throw bad('exceeds ' + MAX_DETAIL_CHARS + ' characters', 'detail');
+  }
+  return s;
+}
+
+function clampLearnLimit(raw) {
+  const n = parseInt(raw || '', 10);
+  if (!isFinite(n)) return DEFAULT_LEARN_LIMIT;
+  return n < 1 ? 1 : (n > MAX_LEARN_LIMIT ? MAX_LEARN_LIMIT : n);
+}
+
+/**
+ * The aggregate the end screen and the daily-encouragement line need, computed
+ * over the rows we already hold. NO EXTRA STATEMENT: a COUNT(*) and a SUM()
+ * across the user's whole history would be a second query for a number the
+ * client can already see, and the local EarStore is the all-time authority
+ * anyway (design Part I s13 — local first, cloud additive).
+ *
+ * WHAT THESE NUMBERS HONESTLY ARE, because two of them are windowed:
+ *  · totalSessions / totalMinutes cover THE RETURNED WINDOW, not all time. At
+ *    the default limit of 60 that is roughly two months of daily practice.
+ *  · streak counts back from today over consecutive days holding at least
+ *    LEARN_STREAK_MIN_SEC of practice. It can be UNDERSTATED if the window cuts
+ *    it off — a user who logs several sessions a day exhausts 60 rows in under
+ *    three weeks. The client asks for more when it wants a longer streak.
+ *  · Days are UTC days (started / 86400). The server has no idea what timezone
+ *    the user is in, and inventing one would be worse than being consistent:
+ *    the client's own EarStore.stats() computes the streak in local time and is
+ *    what the UI shows. This is the cross-device cross-check, not the display.
+ *
+ * An empty TODAY does not break the streak — today is still in progress, and a
+ * user opening the app at 9 a.m. must not be told their streak is over.
+ */
+function learnStats(sessions, now) {
+  const perDay = Object.create(null);      // null-prototype: day numbers are
+  let totalSec = 0;                        // keys, and 'constructor' must not
+  for (let i = 0; i < sessions.length; i++) {   // resolve to a function
+    const s = sessions[i];
+    totalSec += s.durationSec;
+    const day = Math.floor(s.started / 86400);
+    perDay[day] = (perDay[day] || 0) + s.durationSec;
+  }
+  const today = Math.floor(now / 86400);
+  let day = (perDay[today] >= LEARN_STREAK_MIN_SEC) ? today : today - 1;
+  let streak = 0;
+  while (perDay[day] >= LEARN_STREAK_MIN_SEC) { streak++; day--; }
+  return {
+    totalSessions: sessions.length,
+    totalMinutes: Math.round(totalSec / 60),
+    streak: streak
+  };
+}
+
+/* ===========================================================================
+ * POST /api/learn/sessions   — record one completed session. 1 row written.
+ * ======================================================================== */
+export async function learnCreateSessionRoute(request, ctx) {
+  // Same order as createRoute (routes.js:602): the CSRF lock first. A custom
+  // header forces a preflight on any cross-origin attempt and this same-origin
+  // app answers no preflight at all.
+  requireClientHeader(request);
+  requireUser(ctx.session);
+  const user = ctx.user;
+  // Before the body is read, so a looping client's 429 costs no bandwidth
+  // either — and after requireUser, so nobody can spend another user's budget.
+  guardLearnRate(ctx, user.id);
+
+  const body = await readJsonBody(request, MAX_LEARN_BODY);
+
+  // `started` is the CLIENT's clock. MAX_UNIX_SECONDS (routes.js:79) is the
+  // same absolute clamp the admin import header uses; the two window tests
+  // after it are what actually keep a broken clock out of the log.
+  const started = learnInt(body, 'started', 1, MAX_UNIX_SECONDS);
+  if (started > ctx.now + LEARN_FUTURE_SEC) {
+    throw bad('is more than a day ahead of the server clock', 'started');
+  }
+  if (started < ctx.now - LEARN_PAST_SEC) {
+    throw bad('is more than a year in the past', 'started');
+  }
+
+  const durationSec = learnInt(body, 'durationSec', 0, MAX_LEARN_DURATION);
+  const level = learnInt(body, 'level', 1, 7);
+  const mode = learnEnum(body, 'mode', LEARN_MODES);
+  const context = learnEnum(body, 'context', LEARN_CONTEXTS);
+  const taper = learnInt(body, 'taper', 0, 8);
+  if (LEARN_TAPERS.indexOf(taper) < 0) {
+    throw bad('expected ' + LEARN_TAPERS.join(', ') + ' (0 = once per session)', 'taper');
+  }
+  const singGate = learnBool(body, 'singGate');
+
+  const questions = learnInt(body, 'questions', 0, MAX_LEARN_QUESTIONS);
+  // Stated as its own check rather than folded into learnInt's range so the
+  // 400 says what the actual invariant is; "out of range [0, 7]" would leave a
+  // client author guessing where the 7 came from.
+  const correct = learnInt(body, 'correct', 0, MAX_LEARN_QUESTIONS);
+  if (correct > questions) throw bad('cannot exceed questions', 'correct');
+  const assists = learnInt(body, 'assists', 0, MAX_LEARN_ASSISTS);
+
+  // Mic trials are a subset of the questions asked, and each contributes at most
+  // one octave of |deviation| — so an absent mic pins centsSum to 0 by
+  // arithmetic rather than by a separate rule.
+  const centsN = learnInt(body, 'centsN', 0, MAX_LEARN_QUESTIONS);
+  if (centsN > questions) throw bad('cannot exceed questions', 'centsN');
+  const centsSum = learnInt(body, 'centsSum', 0, centsN * MAX_ABS_CENTS);
+
+  const res = await insertEarSession(ctx.env.DB, {
+    userId: user.id,
+    started: started,
+    durationSec: durationSec,
+    level: level,
+    mode: mode,
+    context: context,
+    taper: taper,
+    singGate: singGate,
+    questions: questions,
+    correct: correct,
+    assists: assists,
+    centsSum: centsSum,
+    centsN: centsN,
+    detail: learnDetail(body)
+  });
+  ctx.log('insertEarSession', res);
+
+  if (!res.ok) {
+    // Three collisions on (user_id, started) in a row. db.js walks `started`
+    // forward one second per attempt rather than overwriting, so this means a
+    // stuck client, not a second browser tab.
+    if (res.code === 'conflict') {
+      throw new HttpError(409, 'conflict', {
+        detail: 'a session with that start time already exists'
+      });
+    }
+    // Backstops. The validation above cannot produce these — db.js re-checks the
+    // user id and the detail cap rather than writing a row it would regret.
+    throw bad('could not store the session (' + res.code + ')');
+  }
+
+  // 201 with the STORED row, not the submitted one: `started` may have moved
+  // forward a second to dodge a collision, and the client merges by `started`
+  // (design Part I s13), so it has to be told which value actually landed.
+  return ctx.json({ session: toEarSession(res.row) }, 201);
+}
+
+/* ===========================================================================
+ * GET /api/learn/sessions?limit=60   — the caller's OWN sessions. 0 rows written.
+ *
+ * There is no `owner` parameter and no admin variant, deliberately: unlike
+ * projects (which are public artifacts, R2), a practice log is private to the
+ * person who made it and there is no product reason for anyone else to read it.
+ * The scoping is therefore not a filter the caller passes but ctx.user.id,
+ * bound directly into the WHERE clause.
+ * ======================================================================== */
+export async function learnListSessionsRoute(request, ctx) {
+  // 401 rather than an empty list: unlike GET /api/me, the client only calls
+  // this when it already believes it is signed in, so silence would hide an
+  // expired cookie behind "you have never practised".
+  requireUser(ctx.session);
+
+  const res = await listEarSessions(
+    ctx.env.DB, ctx.user.id, clampLearnLimit(ctx.url.searchParams.get('limit')));
+  ctx.log('listEarSessions', res);
+
+  const rows = res.rows || [];
+  const sessions = new Array(rows.length);
+  for (let i = 0; i < rows.length; i++) sessions[i] = toEarSession(rows[i]);
+
+  // Newest first, straight off the reverse index scan — the stats walk does not
+  // reorder them and the client renders them in this order.
+  return ctx.json({ sessions: sessions, stats: learnStats(sessions, ctx.now) });
+}
+
+/* ===========================================================================
  * admin  (R5: GitHub user 21693187, keyed off the NUMERIC id in auth.js)
  * ======================================================================== */
 export async function adminListRoute(request, ctx) {
@@ -1245,6 +1571,12 @@ export const ROUTES = [
   ['GET', '/projects/:id/head', headRoute],
   ['POST', '/projects/:id/fork', forkRoute],
   ['POST', '/projects/:id/view', viewRoute],
+
+  // Two segments, like '/projects/:id' — but segment one is the literal
+  // 'learn', so the router's segment walk separates them on the first compare
+  // and neither can ever shadow the other.
+  ['POST', '/learn/sessions', learnCreateSessionRoute],
+  ['GET', '/learn/sessions', learnListSessionsRoute],
 
   ['GET', '/admin/projects', adminListRoute],
   ['POST', '/admin/import', adminImportRoute],

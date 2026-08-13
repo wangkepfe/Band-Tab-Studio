@@ -54,7 +54,8 @@
  * function. D1 bills one extra row per index whose column the write TOUCHES.
  * Final index set: projects has 3 (PK autoindex, idx_projects_recent,
  * uq_projects_owner_key); recent_views has 0 (WITHOUT ROWID folds the PK into
- * the table); app_meta has 0.
+ * the table); app_meta has 0; ear_sessions has 0, for the same WITHOUT ROWID
+ * reason (migrations/0004_ear_sessions.sql).
  * ========================================================================== */
 
 // ---------------------------------------------------------------------------
@@ -79,6 +80,25 @@
  *  THE CLIENT MIRRORS THIS CONSTANT (tab-studio/web/api.js) so an oversized doc
  *  fails locally with a useful message instead of as a 413. Change both. */
 export const MAX_PAYLOAD_CHARS = 700000;
+
+/** Hard ceiling on ear_sessions.detail — the /learn per-degree tally. Three
+ *  orders of magnitude below MAX_PAYLOAD_CHARS and that gap is the point: a
+ *  practice session is a dozen integers plus a small compact-JSON blob, and it
+ *  is the only free-form TEXT the feature stores.
+ *
+ *  THE ARITHMETIC. `detail` carries {asked, correct} for at most 12 degrees plus
+ *  a confusion list; compact that is ~250 characters, and spelled out with
+ *  degree labels ~600. 2,000 is ~3x the verbose case, which leaves room for the
+ *  shape to grow without leaving room for abuse — this table has no prune cron,
+ *  so a row written today is a row stored forever.
+ *
+ *  MIRRORED IN TWO OTHER PLACES, and all three must move together:
+ *  migrations/0004_ear_sessions.sql declares CHECK (length(detail) <= 2000) so a
+ *  bypassed route still cannot store a blob, and worker/routes.js validates it
+ *  first so the failure is a 400 naming the field rather than a constraint
+ *  error. This constant is the middle backstop, exactly as checkPayload() is for
+ *  MAX_PAYLOAD_CHARS. */
+export const MAX_DETAIL_CHARS = 2000;
 
 /** The base64 alphabet. This gate is what makes the read path's string-concat
  *  JSON response provably safe: no character in this set needs JSON escaping,
@@ -109,6 +129,23 @@ const DEFAULT_LIMIT = 40;
 const MAX_NAME_CHARS = 200;
 const MAX_Q_CHARS = 80;
 const MINT_ATTEMPTS = 3;
+
+/* ear_sessions bounds. The limit ceiling is 100 for the same reason MAX_LIMIT is
+ * — it is the largest page this Worker will assemble inside a 10 ms budget —
+ * and 100 sessions is over three months of daily practice, which is more than
+ * any streak or trend the client draws needs. The default is 60 because that is
+ * what the /learn client asks for (design Part I s14). */
+const MAX_EAR_LIMIT = 100;
+const DEFAULT_EAR_LIMIT = 60;
+/* Attempts to place a session at `started`, `started + 1`, `started + 2` before
+ * giving up. See insertEarSession() for why this is not INSERT OR REPLACE. */
+const EAR_STARTED_ATTEMPTS = 3;
+/* Backstop bounds mirroring the CHECK constraints in
+ * migrations/0004_ear_sessions.sql. routes.js is the real gate. */
+const MAX_EAR_DURATION_SEC = 86400;
+const MAX_EAR_QUESTIONS = 1000000;
+const MAX_EAR_ASSISTS = 1000000;
+const MAX_ABS_CENTS = 1200;      // one octave of |deviation| per mic trial
 
 /** Better Auth's user table. Quoted because `user` is a keyword in several SQL
  *  dialects, and named once so the coupling to a table we do not own is
@@ -238,11 +275,17 @@ function likeContains(q) {
 }
 
 /**
- * SQLite reports which UNIQUE index a failed INSERT hit, and the two we care
+ * SQLite reports which UNIQUE index a failed INSERT hit, and the three we care
  * about are distinguishable by name:
  *    "UNIQUE constraint failed: projects.id"
  *    "UNIQUE constraint failed: projects.owner_id, projects.client_key"
- * (both verified against SQLite). Anything else is not ours to interpret.
+ *    "UNIQUE constraint failed: ear_sessions.user_id, ear_sessions.started"
+ * (all verified against SQLite). Anything else is not ours to interpret.
+ *
+ * ear_sessions is classified HERE rather than in a second little classifier of
+ * its own precisely because of the `cause` subtlety documented below: that bug
+ * cost us a wrong status code once already, and duplicating the fix is how it
+ * comes back on the path that gets less traffic.
  *
  * BOTH `message` AND `cause.message` ARE INSPECTED. D1 frequently wraps the
  * driver error and surfaces the SQLite constraint text only on `err.cause`,
@@ -257,6 +300,9 @@ function classifyConstraint(err) {
             String((err && err.cause && err.cause.message) || '');
   if (!/constraint failed/i.test(m)) return null;
   if (/CHECK constraint/i.test(m)) return 'check';
+  // Checked before the projects clauses only for reading order; the table names
+  // are disjoint, so the tests cannot shadow one another.
+  if (/ear_sessions\.(user_id|started)/i.test(m)) return 'ear_pk';
   if (/projects\.client_key|projects\.owner_id/i.test(m)) return 'client_key';
   if (/projects\.id/i.test(m)) return 'pk';
   return 'constraint';
@@ -1170,6 +1216,208 @@ export async function recordView(db, p) {
 }
 
 // ---------------------------------------------------------------------------
+// ear_sessions — the /learn practice log (migrations/0004_ear_sessions.sql).
+//
+// The whole feature is LOCAL FIRST: every completed session is already in the
+// browser's localStorage before this table hears about it, and the cloud copy
+// is additive (design Part I s13). That shapes both functions below — a failed
+// write is a code the route can turn into a status, never an exception and
+// never a lost session, because the authoritative copy is elsewhere.
+//
+// ROWS WRITTEN: 1 per session, which is the floor. ear_sessions is WITHOUT
+// ROWID with PRIMARY KEY (user_id, started) and NO secondary indexes, so the
+// table IS the only b-tree and an insert touches it once. Nothing here ever
+// updates or deletes a row: a practice session is an immutable fact.
+// ---------------------------------------------------------------------------
+
+/* The column order every statement in this section uses. Named once so the
+ * INSERT's 14 placeholders and listEarSessions()'s projection cannot drift
+ * apart — they are the same 14 columns in the same order. */
+const EAR_COLS =
+  'user_id, started, duration_sec, level, mode, context, taper, sing_gate, ' +
+  'questions, correct, assists, cents_sum, cents_n, detail';
+
+/** Enum backstops. routes.js rejects anything outside these with a 400 naming
+ *  the field; these decide what a bypassed caller's row looks like instead of
+ *  letting a CHECK constraint abort the insert. */
+function normEarMode(v) { return v === 'produce' ? 'produce' : 'identify'; }
+function normEarContext(v) {
+  return (v === 'ii-V-I' || v === 'drone') ? v : 'cadence';
+}
+/** taper ∈ {1,2,4,8} questions, or 0 for "establish the key once per session".
+ *  0 is the safe default: it is the only value that cannot overstate how often
+ *  the key was re-established. */
+function normEarTaper(v) {
+  const t = Math.floor(Number(v));
+  return (t === 1 || t === 2 || t === 4 || t === 8) ? t : 0;
+}
+
+/**
+ * Pure. Row -> the wire shape the /learn client reads back. The mirror of
+ * toCard() for this table, and it exists for the same reason: the insert path
+ * and the list path must hand the client identical objects, and they would
+ * drift within a week if each built its own.
+ *
+ * ACCURACY IS ABSENT ON PURPOSE — it is correct / questions, computed by
+ * whoever is rendering (design Part I s13). singGate stays 0/1 rather than
+ * becoming a boolean so a record round-trips byte-identical to the localStorage
+ * copy it was merged with.
+ *
+ * Quota cost: none, this touches no database.
+ */
+export function toEarSession(row) {
+  if (!row) return null;
+  return {
+    started: num(row.started),
+    durationSec: num(row.duration_sec),
+    level: num(row.level),
+    mode: normEarMode(row.mode),
+    context: normEarContext(row.context),
+    taper: normEarTaper(row.taper),
+    singGate: num(row.sing_gate) ? 1 : 0,
+    questions: num(row.questions),
+    correct: num(row.correct),
+    assists: num(row.assists),
+    centsSum: num(row.cents_sum),
+    centsN: num(row.cents_n),
+    detail: String(row.detail == null ? '' : row.detail)
+  };
+}
+
+/**
+ * Record one completed session. THE ONLY WRITE THIS FEATURE HAS.
+ *
+ * THE DUPLICATE-START PROBLEM, and why the answer is a retry and not an upsert.
+ * `started` is the CLIENT's clock, and two tabs of /learn on the same machine
+ * can genuinely finish two sessions in the same second — the primary key then
+ * collides on a pair of rows that describe DIFFERENT PRACTICE. The obvious
+ * one-liner, INSERT OR REPLACE, resolves that collision by DESTROYING the first
+ * session: silently, with a 200, and with no way for anyone to notice that ten
+ * minutes of a user's practice log evaporated. So does ON CONFLICT DO UPDATE.
+ * Both trade a visible, rare, retryable error for permanent invisible data loss,
+ * which is the wrong side of that trade for a log whose entire purpose is
+ * "what have I actually done".
+ *
+ * Instead: shift `started` forward one second and try again, up to
+ * EAR_STARTED_ATTEMPTS times, then report 'conflict' and let the route answer
+ * 409. One second of drift on a timestamp that is already the client's own
+ * clock is beneath the resolution of anything that reads it (the streak buckets
+ * by day; the list orders by second), whereas a lost session is not. Three
+ * attempts covers the real case — a human cannot finish four sessions inside
+ * three seconds, so a fourth collision is a stuck client, and that deserves an
+ * error rather than an ever-advancing timestamp.
+ *
+ * A FAILED INSERT WRITES ZERO ROWS: SQLite rolls the statement back on the
+ * constraint violation, so the retries are free in quota terms and cost only
+ * their round trip. rowsWritten therefore reports 1 on success and 0 on every
+ * failure path, which is what ctx.log() adds to the request line.
+ *
+ * All the p.* values are re-normalized here rather than trusted. routes.js has
+ * already validated every one of them and returned 400 for anything out of
+ * range; this is the backstop that prevents a future caller (a repair script, a
+ * test, a second route) from turning a bad value into a CHECK-constraint 500.
+ *
+ * ROWS WRITTEN: 1, or 0 on any failure. Statements: 1, up to 3 on collision.
+ */
+export async function insertEarSession(db, p) {
+  const o = p || {};
+  if (!o.userId) return { ok: false, code: 'bad_owner', rowsWritten: 0 };
+  const detail = String(o.detail == null ? '' : o.detail);
+  if (detail.length > MAX_DETAIL_CHARS) {
+    return { ok: false, code: 'detail_too_large', rowsWritten: 0 };
+  }
+
+  let started = Math.floor(Number(o.started));
+  if (!isFinite(started) || started <= 0) started = nowSec();
+
+  // Derived bounds, in dependency order: the mic-trial count cannot exceed the
+  // question count, and the cents total cannot exceed one octave per mic trial —
+  // which also pins cents_sum to 0 when no mic was used.
+  const questions = clampInt(o.questions, 0, MAX_EAR_QUESTIONS, 0);
+  const centsN = clampInt(o.centsN, 0, questions, 0);
+  const rec = {
+    user_id: String(o.userId),
+    started: started,
+    duration_sec: clampInt(o.durationSec, 0, MAX_EAR_DURATION_SEC, 0),
+    level: clampInt(o.level, 1, 7, 1),
+    mode: normEarMode(o.mode),
+    context: normEarContext(o.context),
+    taper: normEarTaper(o.taper),
+    sing_gate: o.singGate ? 1 : 0,
+    questions: questions,
+    correct: clampInt(o.correct, 0, questions, 0),
+    assists: clampInt(o.assists, 0, MAX_EAR_ASSISTS, 0),
+    cents_sum: clampInt(o.centsSum, 0, centsN * MAX_ABS_CENTS, 0),
+    cents_n: centsN,
+    detail: detail
+  };
+
+  const sql = 'INSERT INTO ear_sessions (' + EAR_COLS + ') ' +
+    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
+
+  for (let attempt = 0; attempt < EAR_STARTED_ATTEMPTS; attempt++) {
+    try {
+      const res = await db.prepare(sql).bind(
+        rec.user_id, rec.started, rec.duration_sec, rec.level, rec.mode,
+        rec.context, rec.taper, rec.sing_gate, rec.questions, rec.correct,
+        rec.assists, rec.cents_sum, rec.cents_n, rec.detail
+      ).run();
+      // The stored row IS `rec` — every value was bound from it — so the route
+      // can answer without a follow-up SELECT. Note rec.started may have moved.
+      return { ok: true, row: rec, started: rec.started, rowsWritten: rw(res) };
+    } catch (err) {
+      const kind = classifyConstraint(err);
+      if (kind === 'ear_pk') { rec.started += 1; continue; }
+      // A CHECK failure means the normalization above has a hole. Report it as
+      // a bad request rather than a 500: the row was never going to be storable.
+      if (kind === 'check') return { ok: false, code: 'bad_request', rowsWritten: 0 };
+      throw err;                        // not ours — let index.js log a 500.
+    }
+  }
+  return { ok: false, code: 'conflict', rowsWritten: 0 };
+}
+
+/**
+ * One user's own recent sessions, newest first.
+ *
+ * A PURE REVERSE INDEX SCAN, and that is the whole design of the table:
+ * `user_id` is the PRIMARY KEY's leading column (equality seek) and `started`
+ * is its trailing column (already ordered within that user's slice), so this
+ * reads exactly `limit` rows with NO filesort and NO temp b-tree. Contrast
+ * listRecentForUser() above, which DOES filesort because recent_views orders by
+ * a column that is deliberately not in its key.
+ *
+ * No age predicate, unlike listRecentForUser(): the practice log is the point of
+ * the feature and a session from last year is still yours. LIMIT is the only
+ * bound, and it is what keeps this from ever becoming a scan.
+ *
+ * WORST-CASE RESPONSE SIZE, because the route JSON.stringifies what it gets
+ * back: 100 rows x (13 small numbers + up to MAX_DETAIL_CHARS) is ~215 KB, and
+ * the realistic figure at a ~200-byte detail is ~25 KB. That is the reason
+ * MAX_EAR_LIMIT is 100 and not "however many you like".
+ *
+ * Quota: 1 statement, <= limit rows read, ZERO written.
+ */
+export async function listEarSessions(db, userId, limit) {
+  if (!userId) return { rows: [], rowsRead: 0 };
+  // null and '' are checked BEFORE clampInt, and that is not defensive noise:
+  // Number(null) and Number('') are both 0, which is finite, so clampInt would
+  // skip its default and return the FLOOR — a caller that omitted the limit
+  // would silently get ONE session instead of sixty. (undefined survives it,
+  // because Number(undefined) is NaN.) routes.js resolves the default before
+  // calling, so this only bites a direct caller — a test, a tool, a future
+  // route — which is exactly the caller who would never notice.
+  const lim = (limit === null || limit === '')
+    ? DEFAULT_EAR_LIMIT
+    : clampInt(limit, 1, MAX_EAR_LIMIT, DEFAULT_EAR_LIMIT);
+  const res = await db.prepare(
+    'SELECT ' + EAR_COLS + ' FROM ear_sessions ' +
+    'WHERE user_id = ? ORDER BY started DESC LIMIT ?'
+  ).bind(String(userId), lim).all();
+  return { rows: res.results || [], rowsRead: rr(res) };
+}
+
+// ---------------------------------------------------------------------------
 // app_meta — tiny ops key/value (seed marker, schema revision, admin id)
 // ---------------------------------------------------------------------------
 
@@ -1231,17 +1479,35 @@ const SCHEMA_PROBES = [
   [
     'SELECT user_id, project_id, viewed FROM recent_views LIMIT 0',
     'recent_views — apply worker/schema.sql'
+  ],
+  /* ear_sessions is probed for the same reason the other three are: without it
+   * NOTHING errors until a user finishes a ten-minute drill and the POST throws
+   * "no such table: ear_sessions" — hours after the deploy, on the one path
+   * nobody is watching, and with the client already showing the session as
+   * saved (it is: locally). Refusing to serve is louder and cheaper.
+   * `detail` is named explicitly so a hand-created table missing the column
+   * fails here rather than at the first insert. */
+  [
+    'SELECT user_id, started, level, questions, detail FROM ear_sessions LIMIT 0',
+    'ear_sessions — apply migrations/0004_ear_sessions.sql'
   ]
 ];
 
-/* Aliased apart: the three tables share column names and a duplicate-keyed
- * result set is not worth depending on, even under LIMIT 0. */
+/* Aliased apart: the four tables share column names (user_id three ways) and a
+ * duplicate-keyed result set is not worth depending on, even under LIMIT 0.
+ *
+ * Still ONE round trip with ear_sessions added. The cross join grows a fourth
+ * term, but LIMIT 0 means the planner never produces a row from it — preparing
+ * the statement is what resolves the table and column names, which is the
+ * entire point of the probe. */
 const SCHEMA_PROBE_ALL =
   'SELECT u.role AS u_role, u.github_id AS u_github_id, ' +
   'p.id AS p_id, p.owner_id AS p_owner_id, p.payload_b64 AS p_payload_b64, ' +
   'p.version AS p_version, p.deleted AS p_deleted, ' +
-  'r.user_id AS r_user_id, r.project_id AS r_project_id, r.viewed AS r_viewed ' +
-  'FROM ' + USER_TABLE + ' u, projects p, recent_views r LIMIT 0';
+  'r.user_id AS r_user_id, r.project_id AS r_project_id, r.viewed AS r_viewed, ' +
+  'e.user_id AS e_user_id, e.started AS e_started, ' +
+  'e.questions AS e_questions, e.detail AS e_detail ' +
+  'FROM ' + USER_TABLE + ' u, projects p, recent_views r, ear_sessions e LIMIT 0';
 
 export async function assertSchema(db) {
   try {

@@ -15,6 +15,7 @@
  *   Api.encodePayload(meta) / decodePayload(b64, enc) / shaMeta(meta)
  *   Api.listSeedProjects() / getSeedProject(id)    <- the bundled fallback library
  *   Api.cardsToLegacy(cards)                       <- shape renderLibrary() eats
+ *   Api.learnSaveSession(rec) / learnListSessions(n)  <- the /learn ear drill
  *
  * Rejections are Errors carrying .status (number), .code (the server's error
  * envelope code) and .body (the parsed envelope), so callers switch on .code.
@@ -493,6 +494,35 @@ var StudioApi = (function () {
     }).then(function (r) { return r.headers.get('X-Studio-View-Recorded') === '1'; }, function () { return false; });
   }
 
+  /* ====================== ear trainer (/learn) ====================== */
+  // The drill at /learn is LOCAL-FIRST: learn/ear-store.js has already written the
+  // session to localStorage before either of these is called, so both are purely
+  // additive and a rejection is never fatal there. Outside cloud mode req() rejects
+  // with 'not_cloud' on its first line (api.js:78) and ear-store.js reads that as
+  // "feature absent", exactly as every other caller does.
+  //
+  // The POST carries X-Studio-Client: '1'. worker/auth.js:830 requireClientHeader
+  // throws 403 bad_client without it — it is the second CSRF lock behind
+  // SameSite=Lax and it guards EVERY mutating route, so the drill is not exempt.
+  // The GET does not send it: nothing is written, and a header a cross-origin form
+  // cannot set buys nothing on a read.
+  function learnSaveSession(rec) {
+    return req('/learn/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Studio-Client': '1' },
+      body: JSON.stringify(rec || {})
+    }).then(jsonOf).then(function (j) { return { session: (j && j.session) || null }; });
+  }
+  // Coerced with |0 so a stray string can never travel as ?limit=NaN; the server
+  // clamps it again to its own ceiling, and omitting it entirely lets that default
+  // apply rather than asserting a number this client invented.
+  function learnListSessions(limit) {
+    var n = limit | 0;
+    return req('/learn/sessions' + (n > 0 ? '?limit=' + n : ''), { method: 'GET', cache: 'no-store' })
+      .then(jsonOf)
+      .then(function (j) { return { sessions: (j && j.sessions) || [], stats: (j && j.stats) || null }; });
+  }
+
   /* ====================== bundled seed library ====================== */
   // The static projects/ bundle build.js ships. In cloud mode it is the FALLBACK
   // library — what a visitor sees when D1 is unreachable, or before the seed
@@ -561,7 +591,8 @@ var StudioApi = (function () {
     renameProject: renameProject, deleteProject: deleteProject, recordView: recordView,
     encodePayload: encodePayload, decodePayload: decodePayload, shaMeta: shaMeta,
     listSeedProjects: listSeedProjects, getSeedProject: getSeedProject, seedUrl: seedUrl,
-    cardsToLegacy: cardsToLegacy
+    cardsToLegacy: cardsToLegacy,
+    learnSaveSession: learnSaveSession, learnListSessions: learnListSessions
   };
 })();
 // House idiom is a bare global; the contract names it StudioApi. Both, one object.

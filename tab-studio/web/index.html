@@ -19,6 +19,10 @@
     <input type="file" id="projFileInput" accept=".json,application/json" hidden>
     <button class="btn sm cloud-only" id="btnDuplicate" title="Make your own copy of this project">⧉ Duplicate</button>
     <button class="btn sm" id="btnLibrary" title="Open the project library">📁 Library</button>
+    <!-- The ear trainer is a separate page, so it is a plain <a> with no id: app.js
+         wires no handler and needs no change. Trailing slash is required — /learn
+         only 307s to /learn/ (auto-trailing-slash), costing a needless round trip. -->
+    <a class="btn sm" href="/learn/" title="Train your ear — name the note against a key center">🎓 Learn</a>
     <span class="dim" id="saveStatus" title="Save state"></span>
   </span>
   <span class="grow"></span>

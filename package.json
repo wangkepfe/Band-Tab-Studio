@@ -5,7 +5,8 @@
   "scripts": {
     "start": "python -m uvicorn app:app --app-dir tab-studio/server --port 8000",
     "build": "node build.js",
-    "test": "node tab-studio/test-core.js"
+    "test": "node tab-studio/test-core.js && node tab-studio/test-ear.js",
+    "test:ear": "node tab-studio/test-ear.js"
   },
   "keywords": [
     "midi",

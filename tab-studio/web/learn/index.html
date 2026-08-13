@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- ============================================================================
+   - index.html (learn)  —  page shell for the /learn ear trainer.
+   -
+   - The canonical URL is /learn/ WITH the trailing slash (contract §B): Cloudflare's
+   - html_handling:auto-trailing-slash serves this file at /learn/ and 307s /learn to
+   - it, and the desktop FastAPI mount (html=True) behaves identically. Every asset
+   - reference below is therefore relative to THIS directory — ../studio.css, not
+   - /studio.css — because on the cloud build a wrong path under /learn/ returns HTTP
+   - 200 with the ROOT index.html body rather than a 404, so a typo would surface only
+   - as a console MIME error.
+   -
+   - <meta charset="utf-8"> is load-bearing, not boilerplate: the degree labels this
+   - page renders are the real glyphs ♭ ♯ · and ear-theory.js compares against those
+   - exact code points.
+   -
+   - Script order is the contract's (§E) and is not negotiable:
+   -   config.js      declares STUDIO_CONFIG.mode; every module below reads it
+   -   api.js         the ONE network surface; ear-store.js calls it by name
+   -   chord-core.js  QUAL, the pitch-class-set table ear-theory.js spells cadences from
+   -   ear-theory.js  pure; must precede ear-session.js, which resolves it as a global
+   -   ear-audio.js / ear-pitch.js   independent, each owns its own AudioContext
+   -   ear-session.js / ear-store.js the state machine and the persistence layer
+   -   learn.js       the controller — everything above is inert until it runs
+   -
+   - sync.js and store.js are deliberately ABSENT (contract §C, §E): sync.js demands a
+   - twelve-hook init() contract from app.js and owns the ?resume= / ?p= query params,
+   - and store.js's IndexedDB is inert outside cloud mode anyway. app.js does not run
+   - here either, so learn.js sets the mode-web / mode-cloud body classes itself.
+   -
+   - The markup below is the DOM CONTRACT learn.css was written against: class names,
+   - the .key[data-deg] pitch-class encoding and the .tuner / .ring / .deg-bar hooks
+   - all have styling that depends on them. The twelve piano keys are the one part
+   - built in JS, because their labels follow the label-style setting.
+   - ========================================================================== -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1117">
+<meta name="color-scheme" content="dark">
+<title>Ear Trainer — name the degree · Band Tab Studio</title>
+<link rel="stylesheet" href="../studio.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+
+<!-- ============ HEADER ============ -->
+<!-- Mirrors the main app's header (contract §E) so the two read as one product:
+     same <header> rules from studio.css:19, same .btn.sm chrome, same #authSlot
+     that renderAuthUI() fills. .learn-head adds only stickiness + wrapping. -->
+<header class="learn-head">
+  <h1>🎓 Ear Trainer</h1>
+  <span class="grow"></span>
+  <button class="icon sm" id="btnSettings" title="Show / hide settings" aria-pressed="false">⚙</button>
+  <a class="btn sm" href="/" title="Back to Band Tab Studio">🎚️ Studio</a>
+  <!-- Cloud sign-in. Rendered by renderAuthUI(); hidden entirely in web/desktop
+       by studio.css:67's body:not(.mode-cloud) .cloud-only rule. -->
+  <span class="auth cloud-only" id="authSlot"></span>
+</header>
+
+<main class="learn-main">
+
+  <!-- ============ STAGE ============ -->
+  <!-- .stage-card has a FIXED min-height on purpose (learn.css §3): the tuner
+       appears and vanishes as the trial moves through its states, and a card that
+       resized would drag the keyboard up and down under the user's finger. -->
+  <section class="stage">
+    <div class="stage-key">key of <b id="keyLabel">—</b></div>
+
+    <div class="stage-card">
+      <p class="state-line" id="stateLine">Name the note against the key.</p>
+      <p class="state-sub"  id="stateSub">Loading…</p>
+      <!-- display:none inline, so el.style.display = '' restores learn.css's
+           display:grid — the app.js:15 show() idiom. -->
+      <div class="tuner" id="tuner" style="display:none">
+        <span class="tuner-note"  id="tunerNote">—</span>
+        <span class="tuner-cents" id="tunerCents">hold and sing</span>
+        <div class="tuner-bar"><i id="tunerNeedle"></i></div>
+      </div>
+    </div>
+
+    <div class="stage-actions">
+      <button class="btn primary" id="btnStart" type="button">▶ Start</button>
+      <button class="btn"      id="btnAgain" type="button" title="Replay — counted as an assist before you commit, free afterwards">♪ Hear it again</button>
+      <button class="btn hold" id="btnSing"  type="button">🎤 Hold to sing</button>
+      <button class="btn"      id="btnNext"  type="button">Next ▸</button>
+      <button class="btn"      id="btnPause" type="button" title="Pause (Esc)">❚❚ Pause</button>
+      <button class="btn"      id="btnEnd"   type="button" title="Stop here and see the summary">■ End</button>
+    </div>
+  </section>
+
+  <!-- ============ THE ANSWER KEYBOARD ============ -->
+  <!-- One octave, tonic at the left, labelled with DEGREES rather than note names.
+       The twelve <button class="key"> children are generated by learn.js because
+       their labels follow the label-style setting; learn.css positions the five
+       black keys off their data-deg PITCH CLASS (1 3 6 8 10). -->
+  <section class="keys">
+    <div class="kb" id="kb" role="group" aria-label="Scale degrees"></div>
+    <p class="kb-hint">
+      <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd><kbd>J</kbd> = 1–7 ·
+      <kbd>W</kbd><kbd>E</kbd> <kbd>T</kbd><kbd>Y</kbd><kbd>U</kbd> = the black degrees ·
+      <kbd>1</kbd>–<kbd>7</kbd> also work ·
+      <kbd>Space</kbd> hear it again / next ·
+      hold <kbd>Shift</kbd> to sing ·
+      <kbd>Esc</kbd> pause
+    </p>
+  </section>
+
+  <!-- ============ LIVE HUD ============ -->
+  <div class="hud">
+    <div class="ring" id="ring" title="Session progress"></div>
+    <div class="hud-item"><span class="hud-num" id="hudTime">0:00</span><span class="hud-label">elapsed</span></div>
+    <div class="hud-item"><span class="hud-num" id="hudQ">0</span><span class="hud-label">questions</span></div>
+    <div class="hud-item"><span class="hud-num" id="hudAcc">—</span><span class="hud-label">accuracy</span></div>
+    <div class="hud-item"><span class="hud-num" id="hudAssist">0</span><span class="hud-label">assists</span></div>
+    <div class="hud-item"><span class="hud-num" id="hudStreak">0</span><span class="hud-label">day streak</span></div>
+  </div>
+
+</main>
+
+<!-- ============ SETTINGS ============ -->
+<!-- A sibling of <main>, so it stacks under the stage in flow and shares its
+     measure (learn.css §6). Hidden with an inline style.display, the repo idiom. -->
+<section class="panel" id="settingsPanel" style="display:none">
+  <h2>⚙ Settings</h2>
+
+  <div class="set-row"><span>Level</span><select id="setLevel" title="Which degrees are in play"></select></div>
+  <div class="set-row"><span>Auto-advance</span>
+    <label class="inline chk" title="At least 15 questions: ≥90% promotes, &lt;60% drops a level">
+      <input type="checkbox" id="setAuto"> move me up at 90%, down below 60%
+    </label>
+  </div>
+
+  <div class="set-row"><span>Drill</span>
+    <select id="setMode">
+      <option value="identify">Identify — hear it, name it</option>
+      <option value="produce">Produce — sing the named degree (mic)</option>
+    </select>
+  </div>
+
+  <div class="set-row"><span>Key context</span>
+    <select id="setContext">
+      <option value="cadence">Cadence — I · IV · V · I</option>
+      <option value="ii-V-I">ii–V–I — the jazz cadence</option>
+      <option value="drone">Drone — a sustained tonic under everything</option>
+    </select>
+  </div>
+
+  <div class="set-row"><span>Re-play the context</span>
+    <select id="setTaper" title="Holding a key across intervening notes IS the memory drill">
+      <option value="1">every question</option>
+      <option value="2">every 2 questions</option>
+      <option value="4">every 4 questions</option>
+      <option value="8">every 8 questions</option>
+      <option value="session">once per session</option>
+    </select>
+  </div>
+
+  <div class="set-row"><span>Sing gate</span>
+    <label class="inline chk" title="Needs the microphone">
+      <input type="checkbox" id="setGate"> sing the note back before naming it
+    </label>
+  </div>
+
+  <div class="set-row"><span>Register spread</span>
+    <select id="setSpread">
+      <option value="1">1 octave above the tonic</option>
+      <option value="2">2 octaves</option>
+    </select>
+  </div>
+
+  <div class="set-row"><span>Timbre</span><select id="setTimbre" title="The test note's voice — the cadence always uses the neutral organ"></select></div>
+
+  <div class="set-row"><span>Voice range</span>
+    <span class="inline">
+      <select id="setRange" title="Test notes are drawn near your voice so sing-back is comfortable"></select>
+      <button class="btn sm" id="btnCalibrate" type="button">Calibrate…</button>
+    </span>
+  </div>
+
+  <div class="set-row"><span>Session length</span>
+    <select id="setLen">
+      <option value="t300">5 minutes</option>
+      <option value="t600">10 minutes</option>
+      <option value="t1200">20 minutes</option>
+      <option value="q20">20 questions</option>
+      <option value="q40">40 questions</option>
+      <option value="endless">Endless</option>
+    </select>
+  </div>
+
+  <div class="set-row"><span>Labels</span>
+    <select id="setLabels">
+      <option value="numbers">Numbers — 1 ♭3 5</option>
+      <option value="solfege">Solfège — do me sol</option>
+      <option value="both">Both — ♭3 · me</option>
+    </select>
+  </div>
+
+  <div class="set-row"><span>Microphone</span>
+    <span class="inline">
+      <button class="btn sm" id="btnMic" type="button">🎤 Enable microphone</button>
+      <span class="dim" id="micState">off</span>
+    </span>
+  </div>
+  <p class="set-note" id="micNote">Optional.</p>
+  <p class="set-note">Nothing you sing is recorded, stored or transmitted. The microphone is open
+    only while you hold the sing control, and the pitch analysis happens inside this page.</p>
+</section>
+
+<!-- ============ FIRST-RUN INTRO ============ -->
+<div class="overlay" id="introOverlay" style="display:none">
+  <div class="overlay-card end-card" role="dialog" aria-modal="true" aria-label="About the ear trainer">
+    <div class="overlay-head"><h2>🎓 Ear Trainer</h2></div>
+    <p class="state-sub" style="max-width:none">You hear a key established, then one note. Say which
+      <b>scale degree</b> it is — 1, ♭3, 5 — not which letter. Degrees are the same in every key and
+      in every octave, which is why this is the one ear skill that transfers to playing.</p>
+    <h3>The ladder</h3>
+    <p class="state-sub" style="max-width:none">Level 1 is <b>1 2 3</b> and lights three keys. Level 7
+      is all twelve. Aim for about <b>80%</b>: under 70% drop a level, over 90% move up.
+      Eight to twelve minutes a day beats an hour once a week.</p>
+    <h3>The microphone is optional</h3>
+    <p class="state-sub" style="max-width:none">Everything works without it. If you turn it on it is
+      <b>push-to-sing</b> — live only while you hold the button (or <kbd>Shift</kbd>), never between
+      presses. <b>No audio is ever recorded, stored or sent anywhere</b>; the pitch is worked out in
+      this page and thrown away.</p>
+    <div class="end-actions">
+      <button class="btn" id="introSettings" type="button">Settings first</button>
+      <button class="btn primary" id="introStart" type="button">▶ Start practising</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ VOICE-RANGE CALIBRATION ============ -->
+<div class="overlay" id="calOverlay" style="display:none">
+  <div class="overlay-card end-card" role="dialog" aria-modal="true" aria-label="Voice range">
+    <div class="overlay-head">
+      <h2>🎤 Voice range</h2>
+      <button class="icon" id="calClose" type="button" title="Close (Esc)">✕</button>
+    </div>
+    <p class="state-line" id="calLine">Sing your lowest comfortable note</p>
+    <p class="state-sub"  id="calSub">Hold the button below and sing — an easy note you could hold all day, not the lowest you can force.</p>
+    <div class="tuner" id="calTuner">
+      <span class="tuner-note"  id="calNote">—</span>
+      <span class="tuner-cents" id="calCents">hold and sing</span>
+      <div class="tuner-bar"><i id="calNeedle"></i></div>
+    </div>
+    <div class="end-actions">
+      <span class="dim grow" id="calResult"></span>
+      <button class="btn" id="calRetry" type="button">Start over</button>
+      <button class="btn hold" id="calHold" type="button">🎤 Hold to sing</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ END OF SESSION ============ -->
+<div class="overlay" id="endOverlay" style="display:none">
+  <div class="overlay-card end-card" role="dialog" aria-modal="true" aria-label="Session summary">
+    <div class="overlay-head">
+      <h2>Session complete</h2>
+      <button class="icon" id="endClose" type="button" title="Close (Esc)">✕</button>
+    </div>
+    <p class="end-verdict" id="endVerdict"></p>
+    <p class="set-note" id="endLevelMove" style="display:none"></p>
+    <div class="end-stats" id="endStats"></div>
+
+    <h3 id="endDegHead">Per degree</h3>
+    <div class="end-degrees" id="endDegrees"></div>
+
+    <h3 id="endConfHead">Top confusions</h3>
+    <ul class="end-confusions" id="endConfusions"></ul>
+
+    <p class="set-note" id="endStreak"></p>
+    <div class="end-actions">
+      <button class="btn" id="endDone" type="button">Done</button>
+      <button class="btn primary" id="endAgain" type="button">▶ Practise again</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="../config.js"></script>
+<script src="../api.js"></script>
+<script src="../chord-core.js"></script>
+<script src="ear-theory.js"></script>
+<script src="ear-audio.js"></script>
+<script src="ear-pitch.js"></script>
+<script src="ear-session.js"></script>
+<script src="ear-store.js"></script>
+<script src="learn.js"></script>
+</body>
+</html>

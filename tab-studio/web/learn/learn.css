@@ -1,0 +1,420 @@
+/* ============================================================================
+ * learn.css  —  page skin for the /learn ear trainer, layered over studio.css.
+ *
+ * Loaded AFTER studio.css and it redefines nothing that lives there: every
+ * colour comes from the tokens declared at studio.css:2-7 (--bg --panel
+ * --panel2 --line --ink --muted --accent --accent2 --good --med --bad --play
+ * --mono) and .btn / .btn.primary / .btn.sm / .icon / .seg / .pill / .overlay /
+ * .overlay-card / .overlay-head / .toast / .grow / .dim / .inline / kbd are
+ * reused verbatim. The drill has to read as another room inside Studio, not as
+ * a page bolted onto the side of it, and the cheapest way to guarantee that is
+ * to add only what is genuinely new here: a stage, a piano, a HUD.
+ *
+ * Four things below are load-bearing rather than decorative:
+ *
+ *   • The page SCROLLS. studio.css:9-11 pins html,body{height:100%} and
+ *     body{overflow:hidden} because the editor is one fixed viewport. A drill
+ *     page that stacks a stage, a keyboard, a settings panel and a summary must
+ *     scroll, so that cage is released first (§1).
+ *   • .stage-card has a FIXED min-height. The tuner appears and vanishes as the
+ *     trial moves through its states (design §4), and a card that resizes under
+ *     a timed drill drags the keyboard up and down under the user's finger
+ *     mid-answer. Reserving the tallest state's space costs nothing and removes
+ *     a whole class of misclicks (§3).
+ *   • .lit vs .dim on the keyboard IS the level ladder made visible — at L1
+ *     three keys are alight and nine are inert slabs; each level lights more.
+ *     The split is by BRIGHTNESS, not opacity: dim keys stay legible (you must
+ *     still be able to read the degree you have not unlocked) while the lit set
+ *     is unmistakable at a glance (§4).
+ *   • The black keys are placed on real piano geometry, not on the white-key
+ *     boundaries. The 2-then-3 grouping is how a player finds the keyboard
+ *     without looking, and an evenly-spaced row of five would quietly teach the
+ *     wrong shape (§4).
+ *
+ *   §1 page shell            §6 settings panel
+ *   §2 header                §7 end-of-session card
+ *   §3 stage + tuner         §8 reduced motion
+ *   §4 keyboard              §9 narrow screens
+ *   §5 hud + session ring
+ * ========================================================================== */
+
+/* ============ §1 page shell ============ */
+/* Release studio.css:9-11's fixed-viewport cage — body only, deliberately.
+   html keeps height:100% so body's min-height:100% still has something to
+   resolve against (a percentage min-height against an auto-height parent
+   computes to nothing), while body's own height:auto is what lets the document
+   grow AND what gives the sticky header (§2) a scroll range longer than one
+   viewport — a height:100% body would let it unstick at the first screenful. */
+body{height:auto;min-height:100%;overflow-y:auto;overflow-x:hidden;
+  -webkit-text-size-adjust:100%}
+
+/* Backstop for JS that hides with the `hidden` attribute. An author `display:`
+   — which several rules below set on .tuner, .panel and .overlay-card — beats
+   the UA sheet's [hidden]{display:none} because author origin outranks UA
+   origin, not because of specificity, so `hidden` would silently do nothing.
+   app.js:15 hides with el.style.display instead (inline, so it needs no help);
+   this covers whichever of the two idioms the page ends up using. */
+[hidden]{display:none !important}
+
+/* The one column everything is centred in. 640px keeps the instruction line at
+   a comfortable measure and leaves the 520px keyboard breathing room. */
+.learn-main{width:100%;max-width:640px;margin:0 auto;padding:20px 16px 26px;
+  display:flex;flex-direction:column;gap:18px}
+
+/* ============ §2 header ============ */
+/* studio.css:19-20 already gives header its flex row, padding, hairline and
+   --panel background. Only two things are new: it sticks (the page scrolls now,
+   and "← Studio" plus the auth slot must stay reachable), and it wraps so the
+   cloud-only auth chip drops to its own line instead of squeezing the title. */
+header.learn-head{position:sticky;top:0;z-index:20;flex-wrap:wrap;gap:8px 12px}
+
+/* ============ §3 stage + tuner ============ */
+.stage{display:flex;flex-direction:column}
+
+/* "KEY OF B♭ major" — deliberately quiet. The key is context the user needs to
+   glance at, never the thing being drilled, so the label is uppercase --muted
+   and only the key name itself is --ink. text-transform is undone on the value
+   child so ear-theory's `keyName()` output keeps its own casing ("B♭ major",
+   not "B♭ MAJOR"); the assembler may mark it up as b/strong/span/em. */
+.stage-key{margin:0 0 9px;text-align:center;font-size:11px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--muted)}
+.stage-key b,.stage-key strong,.stage-key span,.stage-key em{
+  color:var(--ink);font-weight:600;font-style:normal;letter-spacing:.03em;
+  font-size:12.5px;text-transform:none}
+
+/* The state card. min-height is the whole point: LISTEN shows two lines, the
+   mic states add a ~62px tuner underneath, and REVEAL swaps the text again. The
+   tallest state fits inside 206px, so the card never changes size and the
+   keyboard below it never moves while the user is aiming at it. */
+.stage-card{min-height:206px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:12px;padding:20px 18px;text-align:center;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px}
+
+.state-line{font-size:21px;line-height:1.3;font-weight:600;color:var(--ink);margin:0}
+.state-sub{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0;max-width:420px}
+
+/* Tuner — shown only in the mic states, so display:flex here is what
+   `el.style.display = ''` restores it to (app.js:15's show() idiom).
+   Grid rather than flex so the note and the cents readout share one baseline
+   row and the needle bar spans both columns beneath them. */
+.tuner{display:grid;grid-template-columns:auto auto;justify-content:center;
+  align-items:baseline;gap:0 10px;width:100%;max-width:280px;margin:2px auto 0;
+  min-height:62px;align-content:center}
+/* Both readouts are fixed-width and mono: they update every animation frame
+   while the user holds the sing button, and a proportional font would make the
+   pair jitter sideways on every digit change — motion the eye reads as noise. */
+.tuner-note{grid-column:1;min-width:56px;text-align:right;font-family:var(--mono);
+  font-size:24px;line-height:1.15;font-weight:600;color:var(--ink)}
+.tuner-cents{grid-column:2;min-width:56px;text-align:left;font-family:var(--mono);
+  font-size:12.5px;color:var(--muted)}
+
+/* Centre-zero needle. JS sets an inline left:<pct>% on the <i>; translateX(-50%)
+   makes that percentage the needle's CENTRE rather than its left edge, so 50%
+   is dead in tune. The default left:50% keeps it parked in the middle before
+   the first frame arrives. No overflow:hidden — the needle deliberately stands
+   proud of the bar top and bottom, which is what makes it read as a needle. */
+.tuner-bar{grid-column:1 / -1;position:relative;height:12px;margin-top:9px;
+  background:var(--panel2);border:1px solid var(--line);border-radius:6px}
+.tuner-bar::after{content:'';position:absolute;left:50%;top:2px;bottom:2px;width:1px;
+  background:var(--muted);opacity:.65;transform:translateX(-50%)}
+.tuner-bar>i{position:absolute;top:-4px;bottom:-4px;left:50%;width:3px;z-index:1;
+  background:var(--accent);border-radius:2px;transform:translateX(-50%);
+  transition:left .06s linear}
+
+/* .tuner.ok — the held pitch met the stability + clarity gate and was accepted.
+   Colouring the readout, the needle and the bar frame together makes acceptance
+   a single unmissable event rather than a subtle tint on one element. */
+.tuner.ok .tuner-note{color:var(--good)}
+.tuner.ok .tuner-cents{color:var(--good)}
+.tuner.ok .tuner-bar{border-color:rgba(63,185,80,.55);box-shadow:0 0 0 3px rgba(63,185,80,.12)}
+.tuner.ok .tuner-bar>i{background:var(--good)}
+
+/* --- stage actions ------------------------------------------------------- */
+.stage-actions{display:flex;align-items:center;justify-content:center;
+  gap:10px;flex-wrap:wrap;margin-top:14px}
+/* min-width stops the row reflowing when "Hear it" becomes "Hear it again (2)";
+   inline-flex centres the label and gives .btn.hold's status dot a flex slot. */
+.stage-actions .btn{display:inline-flex;align-items:center;justify-content:center;
+  gap:8px;min-width:126px;padding:9px 14px;font-size:13.5px}
+
+/* Press-and-hold mic control (design §11: the mic is live ONLY while held).
+   user-select/touch-callout/touch-action are not polish — without them a long
+   press on touch starts a text selection or opens the iOS callout menu, which
+   fires pointercancel and drops the mic mid-note. */
+.btn.hold{display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+  touch-action:manipulation;transition:background .12s,border-color .12s,transform .06s}
+/* The status dot is always present, just grey when idle — if it only appeared
+   on press the label would shift sideways at the exact moment the user is
+   trying to hold still and sing. */
+.btn.hold::before{content:'';flex:none;width:9px;height:9px;border-radius:50%;
+  background:var(--muted);opacity:.5}
+/* .holding = the mic is open right now. Filled --accent2, a blinking dot and an
+   expanding ring: three independent signals, because "am I being heard?" is the
+   one question the user cannot answer from the audio itself. */
+.btn.hold.holding{background:var(--accent2);border-color:var(--accent2);color:#0b0620;
+  font-weight:600;transform:translateY(1px);animation:learn-live 1.25s infinite}
+.btn.hold.holding:hover{border-color:var(--accent2)}
+.btn.hold.holding::before{background:#fff;opacity:1;animation:learn-dot 1s steps(1,end) infinite}
+@keyframes learn-live{
+  0%{box-shadow:0 0 0 0 rgba(124,92,255,.55)}
+  70%{box-shadow:0 0 0 11px rgba(124,92,255,0)}
+  100%{box-shadow:0 0 0 0 rgba(124,92,255,0)}}
+@keyframes learn-dot{0%,50%{opacity:1}50.01%,100%{opacity:.3}}
+
+/* ============ §4 keyboard ============ */
+.keys{display:flex;flex-direction:column;gap:10px}
+
+/* One octave, tonic at the left. The whites are a plain 7-up flex row; the
+   blacks are absolutely positioned over it (§4 geometry note below).
+   background:var(--line) + gap:2px paints the seams between keys with no
+   per-key side borders, which keeps every white key exactly 1/7 wide and lets
+   the black-key percentages stay honest. touch-action:manipulation kills the
+   double-tap-zoom delay so a tapped answer registers immediately. */
+.kb{position:relative;display:flex;gap:2px;padding:2px;width:100%;max-width:520px;
+  margin:0 auto;height:150px;background:var(--line);border-radius:7px;
+  box-shadow:0 6px 18px rgba(0,0,0,.42);
+  touch-action:manipulation;user-select:none;-webkit-user-select:none}
+
+/* Buttons carry no inherited chrome, so reset them fully rather than leaning on
+   .btn — a piano key is not a button visually and reusing .btn would fight us. */
+.key{appearance:none;-webkit-appearance:none;border:0;margin:0;padding:0 2px 9px;
+  font:inherit;font-size:12px;line-height:1.15;text-align:center;
+  display:flex;align-items:flex-end;justify-content:center;overflow:hidden;
+  transition:background .12s,color .12s,box-shadow .12s,filter .12s}
+.key:focus{outline:none}
+.key:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+
+.key.white{flex:1 1 0;min-width:0;border-radius:0 0 4px 4px}
+/* Black-key geometry — the reason this is a table of literal fractions and not
+   "centre it on the boundary". With white width w = 100%/7 and black width
+   b = 0.6w, a real keyboard sizes the exposed white tops so they are near-equal
+   across each group:
+     group of 2 (♭2 ♭3 over degrees 1 2 3):  3 tops + 2 blacks = 3w  → top = 0.6w
+        ♭2 left = 0.60w      ♭3 left = 1.80w
+     group of 3 (♯4 ♭6 ♭7 over degrees 4 5 6 7, starting at 3w):
+                             4 tops + 3 blacks = 4w  → top = 0.55w
+        ♯4 left = 3.55w      ♭6 left = 4.70w      ♭7 left = 5.85w
+   ♭2 therefore sits LEFT of the 1|2 boundary and ♭3 RIGHT of the 2|3 boundary,
+   exactly as on an instrument — and the wide gaps at 3|4 and 7|1 (no black key)
+   are what let a player orient by feel. */
+.key.black{position:absolute;top:2px;z-index:2;height:62%;
+  width:calc(100% / 7 * 0.6);border-radius:0 0 4px 4px;
+  padding:0 1px 6px;font-size:10.5px}
+.key.black[data-deg='1']{left:calc(100% / 7 * 0.60)}   /* ♭2 */
+.key.black[data-deg='3']{left:calc(100% / 7 * 1.80)}   /* ♭3 */
+.key.black[data-deg='6']{left:calc(100% / 7 * 3.55)}   /* ♯4 */
+.key.black[data-deg='8']{left:calc(100% / 7 * 4.70)}   /* ♭6 */
+.key.black[data-deg='10']{left:calc(100% / 7 * 5.85)}  /* ♭7 */
+
+/* --- lit / dim: the level ladder, made literal ---------------------------- */
+/* LIT keys are the ones in play. A genuinely bright key face against this dark
+   shell is the strongest contrast the palette can produce, so at L1 the three
+   alight keys are visible from across the room and every level-up is felt as
+   more of the instrument switching on. */
+.key.white.lit{background:linear-gradient(180deg,#f2f6fb 0%,#d2dbe7 100%);
+  color:#10151d;font-weight:600;cursor:pointer}
+.key.black.lit{background:linear-gradient(180deg,#3c455a 0%,#141922 100%);
+  color:var(--ink);font-weight:600;cursor:pointer;
+  box-shadow:inset 0 -2px 0 rgba(0,0,0,.55)}
+.key.lit:hover{filter:brightness(1.13)}
+.key.lit:active{transform:translateY(1px)}
+
+/* DIM keys are outside the level. The inert signal is carried entirely by the
+   key FACE going dark — never by fading the label, and never by opacity. The
+   label sits just under --muted (#8b97a7) and clears 4.5:1 against its own
+   face: 4.6:1 on white, 5.0:1 on black. That is deliberate. Seeing "♯4" sitting
+   there legibly unavailable is half of what makes the ladder readable, and
+   against the near-white lit keys a dark face is already an enormous
+   difference, so there is nothing left for a dimmed glyph to add except
+   illegibility. (Measured — the first pass used #5e6a7d/#49536a, which came in
+   at 3.2:1 and 2.4:1 and was genuinely hard to read.) */
+.key.white.dim{background:var(--panel);color:#78859a;cursor:default}
+.key.black.dim{background:#10141b;color:#7b8599;cursor:default}
+
+/* --- answer feedback ------------------------------------------------------ */
+/* .target = the correct degree, revealed. An INSET ring so nothing paints
+   outside the key and gets clipped by a neighbour or the shell's radius. */
+.key.target{z-index:3;box-shadow:inset 0 0 0 2px var(--good),0 0 16px rgba(63,185,80,.32)}
+/* .picked wins over .lit/.dim on source order AND on specificity (4 classes vs
+   3), so a key that is both the target and the pick shows the green fill. */
+.key.white.picked.correct,.key.black.picked.correct{
+  background:var(--good);color:#04170a;font-weight:700}
+.key.white.picked.wrong,.key.black.picked.wrong{
+  background:var(--bad);color:#250604;font-weight:700}
+.key.picked.correct,.key.picked.wrong{z-index:4}
+
+/* Key-binding legend. line-height is generous because it is a row of <kbd>
+   chips (studio.css:44-45) that wrap on narrow screens. */
+.kb-hint{max-width:520px;margin:0 auto;text-align:center;color:var(--muted);
+  font-size:11.5px;line-height:1.9}
+.kb-hint kbd{margin:0 1px}
+
+/* ============ §5 hud + session ring ============ */
+.hud{display:flex;align-items:center;justify-content:center;gap:24px;flex-wrap:wrap;
+  padding:10px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+.hud-item{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:62px}
+.hud-num{font-family:var(--mono);font-size:18px;line-height:1.1;color:var(--ink)}
+.hud-label{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+
+/* Session-time ring. Driven by an inline --p percentage exactly like
+   studio.css:93 .jobbar, so the two progress idioms in the product stay the
+   same idiom. The trailing `0` stop is the standard hard-edge trick: it clamps
+   up to --p, giving a crisp boundary instead of a gradient smear.
+   ::after punches the centre out with the panel colour to make it a ring. */
+.ring{--p:0%;flex:none;width:36px;height:36px;border-radius:50%;position:relative;
+  background:conic-gradient(var(--accent) var(--p),var(--panel2) 0);
+  box-shadow:0 0 0 1px var(--line)}
+.ring::after{content:'';position:absolute;inset:5px;border-radius:50%;background:var(--panel)}
+
+/* ============ §6 settings panel ============ */
+/* A sibling of <main>, so it stacks under the stage in flow and shares its
+   measure. Three hide idioms are honoured because the assembler may reach for
+   any of them: the `hidden` attribute (§1 backstop), a .collapsed class, or the
+   body-level switch studio.css:143 already uses for the editor's toolbars. */
+.panel{width:calc(100% - 32px);max-width:640px;margin:0 auto 28px;padding:14px 16px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;display:block}
+.panel.collapsed{display:none}
+body.settings-collapsed .panel{display:none}
+.panel>h2{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);
+  margin:0 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+
+/* label + control, mirroring the quantize dialog's row grid (studio.css:176-181)
+   so the two settings surfaces in the product feel like one control language. */
+.set-row{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:10px;
+  padding:7px 2px;font-size:12.5px;border-bottom:1px solid rgba(43,50,64,.4)}
+.set-row:last-child{border-bottom:0}
+/* :first-child rather than >label — the label may be a <label>, <span> or <b>,
+   and >label would also catch a .inline.chk sitting in the control column. */
+.set-row>:first-child{color:var(--muted)}
+.set-row select{width:100%}
+.set-row input[type=range]{width:100%;accent-color:var(--accent)}
+.set-row .seg,.set-row .inline,.set-row .btn,.set-row .pill{justify-self:start}
+.set-row.chk{display:flex;gap:8px;align-items:center;color:var(--muted);cursor:pointer}
+.set-note{font-size:11px;color:var(--muted);padding:8px 2px 0;line-height:1.5}
+
+/* ============ §7 end-of-session card ============ */
+/* Narrower than the 880px .overlay-card default (studio.css:187) and scrollable,
+   like .lib-card/.guide-card: the summary is a column of stats, not a wide form. */
+.end-card{max-width:560px;max-height:86vh;overflow:auto;display:flex;flex-direction:column}
+.end-card h3{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);
+  margin:16px 0 7px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+
+/* The verdict is the headline: the 70–90% training band is the whole pedagogy,
+   so it gets a colour, not a sentence buried in a stat grid. Both the band names
+   from EarSession.verdict() (low|in|high) and the plain semantic aliases are
+   accepted so the assembler cannot wire it up wrong.
+   high → --med, not --good: >90% means the drill is too easy, which is a
+   correction to make, not a win. */
+.end-verdict{margin:6px 0 4px;font-size:16px;line-height:1.45;font-weight:600;
+  text-align:center;color:var(--ink)}
+.end-verdict.low,.end-verdict.bad{color:var(--bad)}
+.end-verdict.in,.end-verdict.good{color:var(--good)}
+.end-verdict.high,.end-verdict.med{color:var(--med)}
+
+.end-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;
+  margin-top:8px}
+.end-stat{display:flex;flex-direction:column;align-items:center;gap:3px;padding:10px 8px;
+  background:var(--panel2);border:1px solid var(--line);border-radius:9px;text-align:center}
+.end-stat b,.end-stat strong{font-family:var(--mono);font-size:17px;line-height:1.1;
+  font-weight:600;color:var(--ink)}
+.end-stat span,.end-stat small{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--muted)}
+
+/* Per-degree accuracy. Third column is `auto` and collapses to zero when the row
+   has only a name and a bar, so an added "5/7" count needs no CSS change. */
+.end-degrees{display:flex;flex-direction:column;gap:1px}
+.deg-row{display:grid;grid-template-columns:58px 1fr auto;align-items:center;gap:10px;
+  padding:4px 0}
+.deg-name{font-family:var(--mono);font-size:12px;color:var(--ink);text-align:right}
+.deg-row>b,.deg-row>small,.deg-row>span:last-child{font-family:var(--mono);font-size:11px;
+  color:var(--muted)}
+/* Same --p bar as studio.css:93-94 .jobbar — one progress-bar idiom product-wide. */
+.deg-bar{--p:0%;position:relative;height:8px;border-radius:5px;background:var(--panel2);
+  overflow:hidden;border:1px solid var(--line)}
+.deg-bar>i{position:absolute;inset:0 auto 0 0;width:var(--p);border-radius:5px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .3s}
+/* Optional banding: if the assembler classifies a row by its own accuracy the
+   bar takes the verdict colours; unclassified rows keep the accent gradient. */
+.deg-row.low .deg-bar>i{background:var(--bad)}
+.deg-row.med .deg-bar>i{background:var(--med)}
+.deg-row.good .deg-bar>i{background:var(--good)}
+
+/* "♭7 called 6 — 4 times". Styled on the container and its direct children so it
+   renders the same whether the list is <div>s or a <ul>. */
+.end-confusions{margin:0;padding:0;list-style:none;font-size:12px;color:var(--muted)}
+.end-confusions>*{display:flex;align-items:baseline;gap:8px;padding:4px 2px;
+  border-bottom:1px solid rgba(43,50,64,.35)}
+.end-confusions>*:last-child{border-bottom:0}
+.end-confusions b,.end-confusions strong{font-family:var(--mono);color:var(--ink);font-weight:600}
+
+.end-actions{display:flex;justify-content:flex-end;align-items:center;gap:10px;
+  flex-wrap:wrap;margin-top:16px}
+
+/* ============ §8 reduced motion ============ */
+/* The blinking dot and the expanding ring are the mic-live signal, so they are
+   not simply switched off — .holding keeps a static, permanently-visible ring
+   and a solid white dot. Losing the animation must never lose the information. */
+@media (prefers-reduced-motion:reduce){
+  .key,.btn.hold,.tuner-bar>i,.deg-bar>i,.jobbar>i{transition:none}
+  .btn.hold.holding{animation:none;box-shadow:0 0 0 4px rgba(124,92,255,.4)}
+  .btn.hold.holding::before{animation:none;background:#fff;opacity:1}
+  .key.lit:active{transform:none}
+}
+
+/* ============ §9 narrow screens ============ */
+/* Same 560px breakpoint the editor uses (studio.css:268), same tactics: shrink
+   the chrome, drop fixed control widths, and let two-column grids become one. */
+@media (max-width:560px){
+  .learn-main{padding:14px 10px 22px;gap:14px}
+
+  /* Card shrinks but stays FIXED — the no-jump guarantee is the point, and the
+     mic states (24px readout + 56px tuner + two lines) still fit inside 176px. */
+  .stage-card{min-height:176px;padding:16px 12px;gap:10px}
+  .state-line{font-size:18px}
+  .state-sub{font-size:12px}
+  .tuner{min-height:56px}
+  .tuner-note{font-size:21px;min-width:48px}
+  .tuner-cents{min-width:48px}
+
+  /* Drop the min-width so three buttons wrap tidily instead of forcing a
+     horizontal scroll; they stay finger-sized via padding. */
+  .stage-actions{gap:8px;margin-top:12px}
+  .stage-actions .btn{min-width:0;padding:10px 12px;font-size:12.5px}
+
+  /* Scale the piano, never overflow it: the whites are flex:1 so the octave
+     always fits the column exactly and the black-key calc() percentages follow
+     it down automatically. Only the type has to be re-tuned by hand. */
+  .kb{height:118px;gap:1px;padding:1px}
+  .key{font-size:11px;padding-bottom:7px}
+  .key.black{font-size:9.5px;padding-bottom:5px;top:1px}
+  .kb-hint{font-size:11px;line-height:1.8}
+
+  .hud{gap:14px;padding:9px 10px}
+  .hud-item{min-width:54px}
+  .hud-num{font-size:16px}
+  .ring{width:32px;height:32px}
+  .ring::after{inset:4px}
+
+  .panel{width:calc(100% - 20px);padding:12px 12px}
+  /* One column, matching the guide dialog's narrow-screen row (studio.css:207-210). */
+  .set-row{grid-template-columns:1fr;gap:5px;padding:8px 2px}
+  .set-row .seg,.set-row .inline,.set-row .btn{justify-self:stretch}
+
+  .end-stats{grid-template-columns:repeat(auto-fit,minmax(82px,1fr))}
+  .deg-row{grid-template-columns:46px 1fr auto;gap:8px}
+  .end-actions{justify-content:stretch}
+  .end-actions .btn{flex:1 1 auto}
+}
+
+/* Phone floor (~380px). The keyboard is the only element that genuinely runs out
+   of room: a black key is 0.6/7 of the column, ~29px here, so the label has to
+   come down again and is allowed to wrap onto a second line for the `both`
+   label style ("♭3 · me" breaks at its spaces). */
+@media (max-width:400px){
+  .kb{height:104px}
+  .key{font-size:10px;padding-bottom:6px}
+  .key.black{font-size:8.5px;padding-bottom:4px;white-space:normal;line-height:1.05}
+  .hud{gap:10px;column-gap:12px}
+  .stage-key{font-size:10.5px}
+}
