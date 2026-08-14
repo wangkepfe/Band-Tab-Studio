@@ -177,9 +177,22 @@ var EarStore = (function () {
     singGate:     0,            // mic is optional throughout (Part I §11)
     spread:       1,            // octaves of register spread; L1–L3 use one
     timbre:       'random',     // Part I §7: the test note's voice varies per question
-    voiceRange:   'baritone',   // Part I §9 preset name, kept for the settings UI
-    voiceLo:      43,           // baritone 43–67 (MIDI), the §9 default
-    voiceHi:      67,
+    // Part I §9 as amended by the sing-back change spec §4. The default is the
+    // UNISEX octave, not a voice type: male and female comfortable ranges overlap
+    // in about an octave and F3–F4 is that overlap, so a first-run user of any
+    // voice can sing the target back without touching a setting. The preset table
+    // itself lives in EarTheory.VOICE_RANGES; these three are the only place the
+    // numbers are repeated, and they are repeated on purpose — see the note above
+    // about this module never reading EarTheory.
+    //
+    // Changing a DEFAULT does not touch anybody's stored choice: validateSettings()
+    // only fills keys that are absent (see the `s[k] === undefined` fill below), so
+    // a user who already picked 'baritone' keeps baritone 43–67 forever. That is
+    // deliberate — a stored voiceRange is a real decision, quite possibly the
+    // output of a calibration, and silently rewriting it would be a lie.
+    voiceRange:   'unisex',     // EarTheory.VOICE_RANGES[0].id
+    voiceLo:      53,           // unisex 53–65 (MIDI) = F3–F4
+    voiceHi:      65,
     sessionLimit: 'time',       // Part I §8: 'time' | 'count' | 'endless'
     sessionSec:   600,          // the 10-minute box that serves the 8–12 min/day goal
     sessionQ:     20,
@@ -211,15 +224,23 @@ var EarStore = (function () {
     s.sessionSec   = intIn(s.sessionSec, 60, 3600, DEFAULTS.sessionSec);
     s.sessionQ     = intIn(s.sessionQ, 5, 200, DEFAULTS.sessionQ);
     // Only the TYPE is checked for the two name-valued settings. The authoritative
-    // voice list is EarAudio.VOICES and the range presets are learn.js's; copying
-    // either table here would give it a second place to drift from. An unrecognised
-    // name resolves to a voice EarAudio does not have and falls back there.
+    // voice list is EarAudio.VOICES and the range presets are EarTheory.VOICE_RANGES;
+    // copying either table here would give it a second place to drift from. An
+    // unrecognised name resolves to a voice EarAudio does not have and falls back
+    // there. 'custom' is a legal voiceRange and is in neither table — it means the
+    // lo/hi below came from calibration rather than from a preset.
     s.timbre     = (typeof s.timbre === 'string' && s.timbre) ? s.timbre : DEFAULTS.timbre;
     s.voiceRange = (typeof s.voiceRange === 'string' && s.voiceRange) ? s.voiceRange : DEFAULTS.voiceRange;
     // Voice range in MIDI, span clamped to Part I §9's sane 12–36 semitones so a
     // failed calibration — two readings of the same octave-halved note, say —
     // cannot leave the test-note band empty or absurd. The fallback span is two
     // octaves, which is a legal answer for ANY low note (a fixed 67 would not be).
+    //
+    // BOTH BOUNDS ARE INCLUSIVE and the LOW one has to stay that way: intIn()
+    // clamps with `n < lo ? lo : ...`, so a span of exactly 12 passes through
+    // untouched, and since the change spec §4 default IS exactly one octave
+    // (53 → 65) an exclusive minimum here would silently widen every fresh
+    // install's range to 53–77 and quietly contradict the preset it is named after.
     s.voiceLo = intIn(s.voiceLo, 24, 84, DEFAULTS.voiceLo);
     s.voiceHi = intIn(s.voiceHi, s.voiceLo + 12, s.voiceLo + 36, s.voiceLo + 24);
     return s;

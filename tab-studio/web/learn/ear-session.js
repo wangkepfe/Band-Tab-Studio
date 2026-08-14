@@ -73,8 +73,15 @@ var EarSession = (function () {
     return T;
   }
 
-  var DEFAULT_VOICE_LO   = 43;    // baritone 43–67, design §9 default preset
-  var DEFAULT_VOICE_HI   = 67;
+  // design §9 as amended by the sing-back change spec §4: the default range is the
+  // UNISEX octave F3–F4, not a voice type. This is the third and last copy of that
+  // pair — EarTheory.VOICE_RANGES[0] is the table, ear-store.js:193-195 is what a
+  // fresh install persists, and this is the floor under a caller who supplied
+  // neither bound. It was still 43–67 (baritone) after that change, which made a
+  // settings-less session quietly play in a range no woman was asked about, and
+  // made the comment beside it contradict the default the app actually ships.
+  var DEFAULT_VOICE_LO   = 53;
+  var DEFAULT_VOICE_HI   = 65;
   var MIN_VOICE_SPAN     = 12;    // design §9 clamps the calibrated range to
   var MAX_VOICE_SPAN     = 36;    // 12–36 semitones; guarded again here so the
                                   // play band can never come out empty.

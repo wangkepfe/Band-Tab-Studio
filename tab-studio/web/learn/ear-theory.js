@@ -20,9 +20,21 @@
  * by contrast, DO reuse chord-core.js:20-33 QUAL as the pitch-class-set table
  * rather than retyping interval numbers.
  *
+ * THE SUNG NOTE IS FOLDED INTO THE SINGER'S OWN OCTAVE. singTarget() answers
+ * "which instance of the note just played should the user actually sing back",
+ * and the answer is usually not the one that sounded. Male and female untrained
+ * comfortable ranges sit about an OCTAVE apart, so no single absolute octave is
+ * singable by both; folding the target into the singer's own range is what makes
+ * the trial physically possible. It costs the drill nothing, because degrees are
+ * octave-invariant (design §1) — the degree under test is bit-identical either
+ * way, and matching is on pitch class regardless. The PLAYED note keeps its
+ * random register; that is level 4+'s whole point (design §3), and only the
+ * target the voice chases moves.
+ *
  *   EarTheory.DEGREES                        — 12 × {pc,num,solfege,black}
  *   EarTheory.LEVELS                         — 7 × {n,name,degrees,mode,spread,taper}
  *   EarTheory.VOICES                         — timbre names, mirrors ear-audio.js
+ *   EarTheory.VOICE_RANGES                   — 6 × {id,name,lo,hi,hint}, unisex first
  *   EarTheory.FLAT / .SHARP                  — the two accidental glyphs
  *   EarTheory.levelFor(n)                    — clamped LEVELS lookup, 1-based
  *   EarTheory.keyName(pc, mode)              — 'B♭'          spelled for the key
@@ -34,6 +46,8 @@
  *   EarTheory.label(deg, style)              — '♭3' | 'me' | '♭3 · me'
  *   EarTheory.cadence(kind, tonicPc, mode)   — [{midis,beats,roman,name}]
  *   EarTheory.playBand(voiceLo, voiceHi, spread) — {lo,hi} MIDI band for test notes
+ *   EarTheory.voiceRangeFor(id)              — VOICE_RANGES lookup, null if unknown
+ *   EarTheory.singTarget(midi, voiceLo, voiceHi) — the instance of midi to sing back
  *   EarTheory.nextQuestion(state, rnd)       — the whole draw for one trial
  *   EarTheory.midiToFreq(midi)               — Hz
  * ========================================================================== */
@@ -346,6 +360,39 @@ var EarTheory = (function () {
     return out;
   }
 
+  // ---- voice ranges ---------------------------------------------------------
+  // design §9, amended by the sing-back change spec §4. `unisex` is first and is
+  // the default (ear-store.js:193-195): male and female untrained comfortable
+  // ranges only overlap in about an octave, and F3–F4 is the balanced midpoint —
+  // F3 is reachable by most women (comfortable for an alto, a little low for a
+  // soprano) and F4 by most men (comfortable for a tenor, the top of comfortable
+  // for a baritone). Every voice-type preset stays available and unchanged.
+  //
+  // This table is THE source of truth for the settings UI. learn.js used to carry
+  // its own copy, which is one copy too many for a list that must also agree with
+  // playBand()'s fallback below — and that copy had already drifted (it labelled
+  // MIDI 40 "C2"; 40 is E2). `custom` is deliberately NOT a member: it is the UI
+  // affordance that opens the calibration flow, not a range, and it has no lo/hi
+  // to be the truth about. `lo`/`hi` are MIDI, and each `name` spells those same
+  // two numbers out (C4 = 60, so 53 = F3 and 65 = F4).
+  var VOICE_RANGES = [
+    { id: 'unisex',   name: 'Everyone (F3–F4)', lo: 53, hi: 65,
+      hint: 'The octave nearly every voice can sing. Calibrate to fit it to yours.' },
+    { id: 'bass',     name: 'Bass (E2–E4)',     lo: 40, hi: 64, hint: '' },
+    { id: 'baritone', name: 'Baritone (G2–G4)', lo: 43, hi: 67, hint: '' },
+    { id: 'tenor',    name: 'Tenor (C3–A4)',    lo: 48, hi: 69, hint: '' },
+    { id: 'alto',     name: 'Alto (F3–D5)',     lo: 53, hi: 74, hint: '' },
+    { id: 'soprano',  name: 'Soprano (C4–A5)',  lo: 60, hi: 81, hint: '' }
+  ];
+  // The fallback both playBand() and singTarget() reach for when the caller has no
+  // usable range. Held by reference so there is exactly one 53/65 in this file.
+  var UNISEX = VOICE_RANGES[0];
+
+  function voiceRangeFor(id) {
+    for (var i = 0; i < VOICE_RANGES.length; i++) if (VOICE_RANGES[i].id === id) return VOICE_RANGES[i];
+    return null;                             // 'custom', or a name from a newer build
+  }
+
   // ---- register -------------------------------------------------------------
   // 40 is the bottom of the MPM lag search (70 Hz, design §11) — a tonic below it
   // could be played but never sung back and graded. 88 is a self-imposed ceiling
@@ -360,10 +407,18 @@ var EarTheory = (function () {
   // Widening is biased upward (⅓ down, ⅔ up) because the tonic sits at the bottom:
   // a slightly-too-high top note is still nameable, a too-low reference just turns
   // to mud.
+  //
+  // The default range is now the ONE-OCTAVE unisex band (change spec §4), which is
+  // narrower than any voice-type preset and narrower than `need` at BOTH spreads —
+  // so the widening below is no longer an edge case, it is the normal path: 53–65
+  // becomes 50–72 at spread 1 and 46–80 at spread 2. Both stay inside 40…88, so
+  // neither clamp fires and the band can never invert. Twelve semitones is also
+  // the floor ear-store.js:245 enforces on a stored range, so nothing narrower
+  // than this reaches here from settings.
   function playBand(voiceLo, voiceHi, spread) {
     var need = 12 * (spread === 2 ? 2 : 1) + 10;
     var lo = Math.round(voiceLo), hi = Math.round(voiceHi), down;
-    if (!(lo < hi)) { lo = 43; hi = 67; }             // baritone default, design §9
+    if (!(lo < hi)) { lo = UNISEX.lo; hi = UNISEX.hi; }   // unisex F3–F4, change spec §4
     if (hi - lo < need) {
       down = Math.floor((need - (hi - lo)) / 3);
       hi += (need - (hi - lo)) - down;
@@ -373,6 +428,47 @@ var EarTheory = (function () {
     if (hi < lo + need) hi = lo + need;
     if (hi > BAND_MAX) { hi = BAND_MAX; if (lo > hi - need) lo = hi - need; }
     return { lo: lo, hi: hi };
+  }
+
+  /* Which instance of the played note the USER should sing back.
+   *
+   * The played note keeps the register it was drawn in — spreading the register is
+   * the skill L4+ exists to train (design §3) — but the voice chases that note's
+   * PITCH CLASS inside its own range. Male and female comfortable ranges sit about
+   * an octave apart, so there is no absolute octave both can reach; folding is the
+   * only way one drill serves both singers. The degree is unaffected: degrees are
+   * octave-invariant (design §1) and matching is on pitch class at ±50 cents, so
+   * an octave displacement is already accepted — this just aims the singer at the
+   * displacement that is comfortable instead of leaving them to find it.
+   *
+   * Pure and deterministic — no rnd, no clock — so the same trial always asks for
+   * the same note, and a seeded session replays exactly.
+   */
+  function singTarget(playedMidi, voiceLo, voiceHi) {
+    var pc = norm12(playedMidi);
+    var lo = Math.round(voiceLo), hi = Math.round(voiceHi), mid, m, key, best = null, bestKey = 0;
+    if (!(lo < hi)) { lo = UNISEX.lo; hi = UNISEX.hi; }  // same fallback as playBand()
+    mid = (lo + hi) / 2;
+    // Walk every instance that can touch the band, starting a full octave BELOW it.
+    // A stored range is at least 12 semitones (ear-store.js:245) and then the
+    // nearest instance to the centre is always in the band, but callers may hand
+    // over anything, and with a narrower band the winner can sit outside it — the
+    // penalty below then needs both neighbours present to choose between.
+    for (m = seatIn(pc, lo - 12); m <= hi + 12; m += 12) {
+      // Nearest the CENTRE wins: the middle of a comfortable range is the part of
+      // it that is actually comfortable. The out-of-band penalty is far larger than
+      // any distance this loop can produce, so an instance inside the band always
+      // beats one outside however close that one sits.
+      key = Math.abs(m - mid) + ((m >= lo && m <= hi) ? 0 : 1000);
+      // Strictly-less, over an ASCENDING walk, so an exact tie takes the LOWER
+      // instance. A pitch class a tritone from the centre is exactly tied — F is,
+      // in the unisex band, where F3 and F4 are both endpoints. Low wins because
+      // the top of a range is where a voice starts pushing, and a pushed note goes
+      // sharp: that would feed the intonation stat (design §11) a bias belonging to
+      // the singer's larynx rather than to their ear.
+      if (best === null || key < bestKey) { best = m; bestKey = key; }
+    }
+    return best;
   }
 
   // ---- the draw -------------------------------------------------------------
@@ -475,12 +571,14 @@ var EarTheory = (function () {
   }
 
   var api = {
-    DEGREES: DEGREES, LEVELS: LEVELS, VOICES: VOICES, FLAT: FLAT, SHARP: SHARP,
+    DEGREES: DEGREES, LEVELS: LEVELS, VOICES: VOICES, VOICE_RANGES: VOICE_RANGES,
+    FLAT: FLAT, SHARP: SHARP,
     levelFor: levelFor,
     keyName: keyName, keyLabel: keyLabel,
     spellDegree: spellDegree, noteName: noteName,
     degreeOf: degreeOf, midiForDegree: midiForDegree,
     label: label, cadence: cadence, playBand: playBand,
+    voiceRangeFor: voiceRangeFor, singTarget: singTarget,
     nextQuestion: nextQuestion, midiToFreq: midiToFreq
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

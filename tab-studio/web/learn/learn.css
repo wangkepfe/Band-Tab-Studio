@@ -10,7 +10,7 @@
  * a page bolted onto the side of it, and the cheapest way to guarantee that is
  * to add only what is genuinely new here: a stage, a piano, a HUD.
  *
- * Four things below are load-bearing rather than decorative:
+ * Five things below are load-bearing rather than decorative:
  *
  *   • The page SCROLLS. studio.css:9-11 pins html,body{height:100%} and
  *     body{overflow:hidden} because the editor is one fixed viewport. A drill
@@ -21,6 +21,13 @@
  *     a timed drill drags the keyboard up and down under the user's finger
  *     mid-answer. Reserving the tallest state's space costs nothing and removes
  *     a whole class of misclicks (§3).
+ *   • The .tuner says WHERE TO GO, never WHAT YOU SANG. Printing the name of
+ *     the pitch the user is singing, directly under a header reading "KEY OF
+ *     B♭", hands them the scale degree by subtraction — the answer, for free.
+ *     So the readout is a DIRECTION (higher / lower / that's it), and its three
+ *     states are separated by size, weight and border as much as by hue,
+ *     because the user is mid-phrase, watching the needle rather than the
+ *     words, and may be colour-blind (§3).
  *   • .lit vs .dim on the keyboard IS the level ladder made visible — at L1
  *     three keys are alight and nine are inert slabs; each level lights more.
  *     The split is by BRIGHTNESS, not opacity: dim keys stay legible (you must
@@ -83,51 +90,155 @@ header.learn-head{position:sticky;top:0;z-index:20;flex-wrap:wrap;gap:8px 12px}
   font-size:12.5px;text-transform:none}
 
 /* The state card. min-height is the whole point: LISTEN shows two lines, the
-   mic states add a ~62px tuner underneath, and REVEAL swaps the text again. The
-   tallest state fits inside 206px, so the card never changes size and the
-   keyboard below it never moves while the user is aiming at it. */
-.stage-card{min-height:206px;display:flex;flex-direction:column;align-items:center;
+   mic states add a ~76px tuner underneath, and REVEAL swaps the text again.
+   The floor went 206 → 210 with this change, because the tuner grew from 62px
+   when it stopped naming the note and became a direction (§3). The sum is
+   recorded rather than assumed, and measured in the browser rather than
+   estimated — including the two terms that are easiest to leave out of it, the
+   1px border top and bottom and the tuner's own top margin:
+       2 border (min-height is border-box) + 40 padding
+     + 27.3 .state-line + 24 for the two flex gaps
+     + 37.5 for a .state-sub that wraps to two lines
+     + 2 .tuner top margin + 76 .tuner            =  208.8   →  210 floor
+   Raising the floor rather than shrinking the readout is the deliberate call:
+   reserving space costs a few pixels of stage, whereas a card that resizes
+   drags the keyboard up and down under the user's finger mid-answer, which is
+   the whole reason this min-height exists. Treat the 1.2px left over as a
+   budget — anything added to a mic state has to come out of something else. */
+.stage-card{min-height:210px;display:flex;flex-direction:column;align-items:center;
   justify-content:center;gap:12px;padding:20px 18px;text-align:center;
   background:var(--panel);border:1px solid var(--line);border-radius:12px}
 
 .state-line{font-size:21px;line-height:1.3;font-weight:600;color:var(--ink);margin:0}
 .state-sub{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0;max-width:420px}
 
-/* Tuner — shown only in the mic states, so display:flex here is what
-   `el.style.display = ''` restores it to (app.js:15's show() idiom).
-   Grid rather than flex so the note and the cents readout share one baseline
-   row and the needle bar spans both columns beneath them. */
-.tuner{display:grid;grid-template-columns:auto auto;justify-content:center;
-  align-items:baseline;gap:0 10px;width:100%;max-width:280px;margin:2px auto 0;
-  min-height:62px;align-content:center}
-/* Both readouts are fixed-width and mono: they update every animation frame
-   while the user holds the sing button, and a proportional font would make the
-   pair jitter sideways on every digit change — motion the eye reads as noise. */
-.tuner-note{grid-column:1;min-width:56px;text-align:right;font-family:var(--mono);
-  font-size:24px;line-height:1.15;font-weight:600;color:var(--ink)}
-.tuner-cents{grid-column:2;min-width:56px;text-align:left;font-family:var(--mono);
-  font-size:12.5px;color:var(--muted)}
+/* Tuner — shown only in the mic states, so display:GRID here is what
+   `el.style.display = ''` restores it to (app.js:15's show() idiom). That value
+   is a contract with the markup, which names it: index.html:74-75. Do not swap
+   it for flex without changing that comment too.
+
+   ONE COLUMN, where there used to be two. This block was a tuner in the literal
+   sense — a note name on one baseline beside a ±cents number — and it is not
+   one any more. learn.js no longer prints the name of the pitch being sung,
+   because that name plus the "KEY OF B♭" header two lines above it IS the scale
+   degree, by subtraction, with no ear involved. The three slots now carry:
+
+     #tunerNote    a DIRECTION   "▲ higher" · "▼ lower" · "✓ that's it"
+     #tunerCents   a coaching line   "keep going" · "almost" · "hold it"
+     #tunerNeedle  proximity, unchanged geometry (50% = dead centre = matched)
+
+   A direction and its coaching line are one sentence read top-to-bottom, so
+   they stack. Side by side they would compete for the same glance, and the
+   glance is the scarce resource here — the user is holding a note while reading.
+
+   The calibration overlay (index.html:244-248) reuses this exact markup and
+   still shows a real note name in the direction slot, which leaks nothing:
+   there is no question in play during calibration. So nothing below may assume
+   the direction strings, and #calTuner only ever wears the base state and .ok.
+
+   Height budget, spent against .stage-card's 210px floor (§3 above), measured
+   rather than estimated:
+       38 chip + 2 .tuner-cents margin + 15.6 cents + 8 bar margin + 12 bar
+     = 75.6,  rounded up to the 76 reserved below.
+   gap is 0 and each row carries its own spacing instead, which is not fussiness:
+   a grid row-gap applies to BOTH gaps, so a gap wide enough to separate the two
+   text lines silently bought a second one under the cents line, where the bar's
+   own margin had already provided it. That double-spend cost 4px, and 4px was
+   the difference between fitting inside the card and making it grow. */
+.tuner{display:grid;grid-template-columns:1fr;justify-items:center;gap:0;
+  width:100%;max-width:300px;margin:2px auto 0;min-height:76px;align-content:center}
+
+/* The direction — deliberately the largest thing on the stage, larger than
+   .state-line's 21px. The user reads this out of the corner of an eye while
+   singing, so anything they would have to focus on to read is a line they will
+   not read at all.
+   NOT var(--mono) any more: this slot carries words now, not digits, and the
+   old fixed-width argument left with the note name. Sideways jitter is handled
+   instead by centring the three strings inside a FIXED 38px box, so they grow
+   and shrink about the middle and the coaching line and the bar never move.
+   The transparent border is declared in the base state on purpose: .ok only
+   paints it. A border that appeared would resize the chip, and the match is the
+   one instant in a trial when nothing is allowed to jump.
+   nowrap because a second line would overflow that fixed box. */
+.tuner-note{grid-column:1;display:flex;align-items:center;justify-content:center;
+  min-height:38px;padding:2px 12px;border:1px solid transparent;border-radius:9px;
+  font-size:26px;line-height:1.05;font-weight:600;letter-spacing:.01em;
+  white-space:nowrap;color:var(--muted);
+  transition:color .12s,background-color .12s,border-color .12s}
+
+/* The coaching line stays secondary — the second half of the sentence, not a
+   second headline. It keeps var(--mono) even though it usually holds words,
+   because calibration renders a live ±N¢ number in this slot on every animation
+   frame (learn.js:1118) and a proportional face makes that jitter sideways on
+   every digit change — motion the eye reads as noise. */
+.tuner-cents{grid-column:1;margin-top:2px;font-family:var(--mono);font-size:12px;
+  line-height:1.3;color:var(--muted);transition:color .12s}
 
 /* Centre-zero needle. JS sets an inline left:<pct>% on the <i>; translateX(-50%)
    makes that percentage the needle's CENTRE rather than its left edge, so 50%
    is dead in tune. The default left:50% keeps it parked in the middle before
    the first frame arrives. No overflow:hidden — the needle deliberately stands
-   proud of the bar top and bottom, which is what makes it read as a needle. */
-.tuner-bar{grid-column:1 / -1;position:relative;height:12px;margin-top:9px;
-  background:var(--panel2);border:1px solid var(--line);border-radius:6px}
-.tuner-bar::after{content:'';position:absolute;left:50%;top:2px;bottom:2px;width:1px;
-  background:var(--muted);opacity:.65;transform:translateX(-50%)}
+   proud of the bar top and bottom, which is what makes it read as a needle.
+   The border stays 1px in ALL THREE states: the needle is absolutely positioned,
+   so its left% resolves against this element's PADDING box, and fattening the
+   border on match would quietly drag the whole scale inward and shift every
+   reading. .ok takes its extra weight from a box-shadow ring instead, which
+   lives outside the box model and so cannot move the needle. */
+.tuner-bar{grid-column:1 / -1;justify-self:stretch;position:relative;height:12px;
+  margin-top:8px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;transition:border-color .12s,box-shadow .12s}
+/* The centre mark, and it is the reason the bar is readable at all: "dead
+   centre = you are on the note" is its entire meaning, and without a target
+   painted on it the needle is a position with nothing to be a position
+   RELATIVE TO. Full height and 2px rather than the old inset hairline, because
+   it has to stay visible with a 3px needle parked on top of it — and when the
+   two do coincide, that is the match, so they should look like one object. */
+.tuner-bar::after{content:'';position:absolute;left:50%;top:0;bottom:0;width:2px;
+  background:var(--muted);opacity:.55;border-radius:1px;transform:translateX(-50%);
+  transition:background-color .12s,opacity .12s}
 .tuner-bar>i{position:absolute;top:-4px;bottom:-4px;left:50%;width:3px;z-index:1;
   background:var(--accent);border-radius:2px;transform:translateX(-50%);
-  transition:left .06s linear}
+  transition:left .06s linear,width .12s,background-color .12s}
 
-/* .tuner.ok — the held pitch met the stability + clarity gate and was accepted.
-   Colouring the readout, the needle and the bar frame together makes acceptance
-   a single unmissable event rather than a subtle tint on one element. */
-.tuner.ok .tuner-note{color:var(--good)}
+/* --- the three states, and why not one of them is only a colour ------------ */
+/* Base (no class) is "far off": --muted type, a bare chip, a thin needle. Calm
+   on purpose — a singer 300 cents flat is not in trouble, they are mid-slide —
+   but the NEEDLE keeps --accent rather than going grey along with the text,
+   because the needle is the liveness signal and must never read as "we cannot
+   hear you" when the only thing wrong is the pitch.
+   Each rung then moves size, weight, chip border and needle width as well as
+   hue, so the ladder survives greyscale, a colour-blind reader, and the fact
+   that the user is watching the bar rather than the words:
+       chip    none  →  outlined  →  filled
+       needle  3px   →  5px       →  8px    */
+
+/* .near — inside 150 cents. Building, not arrived: the chip is outlined but not
+   filled, and the coaching line stays --muted so the direction keeps the glance.
+   --med is already this product's "close, not there" colour (.end-verdict.high,
+   .deg-row.med), so this borrows a meaning the user has met before. */
+.tuner.near .tuner-note{font-size:27px;font-weight:700;color:var(--med);
+  border-color:rgba(212,167,44,.45)}
+.tuner.near .tuner-bar{border-color:rgba(212,167,44,.45)}
+.tuner.near .tuner-bar::after{opacity:.75}
+.tuner.near .tuner-bar>i{background:var(--med);width:5px}
+
+/* .ok — MATCHED, inside 50 cents. Not a tint on a readout: this is the instant
+   the answer keyboard unlocks (design §4, LISTEN → ANSWERABLE), so the whole
+   block turns over at once — the chip fills, the type steps up in size and
+   weight, the needle more than doubles in width and lands on a centre mark that
+   has itself gone green, and the bar takes a ring. The coaching line drops its
+   "secondary" here and only here, because at this point there is nothing left
+   to coach.
+   NOTE, because this class changed meaning: .ok used to say "a steady pitch was
+   captured" — ANY pitch. It now says the sung pitch CLASS matches the target,
+   which is the gate learn.js enforces before it will accept an answer. */
+.tuner.ok .tuner-note{font-size:29px;font-weight:800;color:var(--good);
+  background:rgba(63,185,80,.13);border-color:rgba(63,185,80,.55)}
 .tuner.ok .tuner-cents{color:var(--good)}
-.tuner.ok .tuner-bar{border-color:rgba(63,185,80,.55);box-shadow:0 0 0 3px rgba(63,185,80,.12)}
-.tuner.ok .tuner-bar>i{background:var(--good)}
+.tuner.ok .tuner-bar{border-color:var(--good);
+  box-shadow:0 0 0 1px var(--good),0 0 0 4px rgba(63,185,80,.13)}
+.tuner.ok .tuner-bar::after{background:var(--good);opacity:.9}
+.tuner.ok .tuner-bar>i{background:var(--good);width:8px}
 
 /* --- stage actions ------------------------------------------------------- */
 .stage-actions{display:flex;align-items:center;justify-content:center;
@@ -354,9 +465,17 @@ body.settings-collapsed .panel{display:none}
 /* ============ §8 reduced motion ============ */
 /* The blinking dot and the expanding ring are the mic-live signal, so they are
    not simply switched off — .holding keeps a static, permanently-visible ring
-   and a solid white dot. Losing the animation must never lose the information. */
+   and a solid white dot. Losing the animation must never lose the information.
+   The same test applies to the tuner and it passes trivially: its three states
+   (§3) are carried by size, weight, colour and border, all of which land
+   instantly here. Only the crossfade between them is dropped, so a reader with
+   vestibular sensitivity sees the identical ladder, just cut rather than faded.
+   The needle's own transition goes too — it is the fastest-moving thing on the
+   page (a new left% every animation frame) and interpolating it is exactly the
+   kind of continuous motion this query exists to suppress. */
 @media (prefers-reduced-motion:reduce){
-  .key,.btn.hold,.tuner-bar>i,.deg-bar>i,.jobbar>i{transition:none}
+  .key,.btn.hold,.tuner-note,.tuner-cents,.tuner-bar,.tuner-bar::after,
+  .tuner-bar>i,.deg-bar>i,.jobbar>i{transition:none}
   .btn.hold.holding{animation:none;box-shadow:0 0 0 4px rgba(124,92,255,.4)}
   .btn.hold.holding::before{animation:none;background:#fff;opacity:1}
   .key.lit:active{transform:none}
@@ -368,14 +487,28 @@ body.settings-collapsed .panel{display:none}
 @media (max-width:560px){
   .learn-main{padding:14px 10px 22px;gap:14px}
 
-  /* Card shrinks but stays FIXED — the no-jump guarantee is the point, and the
-     mic states (24px readout + 56px tuner + two lines) still fit inside 176px. */
-  .stage-card{min-height:176px;padding:16px 12px;gap:10px}
+  /* Card shrinks but stays FIXED — the no-jump guarantee is the point. The
+     budget is re-run for this breakpoint rather than scaled by eye, and it
+     carries the same two easily-forgotten terms as the desktop sum (§3):
+         2 border + 32 padding + 23.4 .state-line + 20 for the two gaps
+       + 36 two-line .state-sub + 2 .tuner margin + 68.3 tuner  =  183.7
+     That is why the card went 176 → 188 with this change. The direction readout
+     is taller than the note name it replaced, and the honest fix is to reserve
+     the room rather than let the keyboard twitch under a thumb — on the one
+     screen size where the thumb is what is covering the keyboard. */
+  .stage-card{min-height:188px;padding:16px 12px;gap:10px}
   .state-line{font-size:18px}
   .state-sub{font-size:12px}
-  .tuner{min-height:56px}
-  .tuner-note{font-size:21px;min-width:48px}
-  .tuner-cents{min-width:48px}
+  /* Same 38 → 33 → the direction stays comfortably the biggest thing on the
+     card (18px .state-line here), which is the whole reason it is legible
+     mid-phrase. Sizes shrink; the size LADDER between the three states does
+     not, because that is what makes them distinguishable without colour. */
+  .tuner{min-height:68px;max-width:100%}
+  .tuner-note{min-height:33px;padding:2px 10px;font-size:22px}
+  .tuner.near .tuner-note{font-size:23px}
+  .tuner.ok .tuner-note{font-size:25px}
+  .tuner-cents{font-size:11px}
+  .tuner-bar{margin-top:7px}
 
   /* Drop the min-width so three buttons wrap tidily instead of forcing a
      horizontal scroll; they stay finger-sized via padding. */
@@ -410,7 +543,15 @@ body.settings-collapsed .panel{display:none}
 /* Phone floor (~380px). The keyboard is the only element that genuinely runs out
    of room: a black key is 0.6/7 of the column, ~29px here, so the label has to
    come down again and is allowed to wrap onto a second line for the `both`
-   label style ("♭3 · me" breaks at its spaces). */
+   label style ("♭3 · me" breaks at its spaces).
+   The tuner deliberately takes no third step, and that is a measurement rather
+   than an oversight: at 380px the card's inner width is 334px (380 − 20 main
+   padding − 24 card padding − 2 border), while the widest direction chip —
+   "✓ that's it" at the 25px .ok size — measures 146px including its padding. It
+   has better than twice the room it needs, and shrinking the one line the user
+   reads while singing, to buy space nothing is asking for, would be a straight
+   loss. Its nowrap (§3) is what keeps the failure mode here "too wide", which
+   is visible, rather than a silent second line inside a fixed-height chip. */
 @media (max-width:400px){
   .kb{height:104px}
   .key{font-size:10px;padding-bottom:6px}

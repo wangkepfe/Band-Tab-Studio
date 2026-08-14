@@ -8,7 +8,7 @@
  * ear-pitch.js hears the voice, ear-store.js persists. The job here is to be the
  * wiring between them and the user, and to be honest about what is unavailable.
  *
- * Five decisions in here are load-bearing rather than incidental:
+ * Six decisions in here are load-bearing rather than incidental:
  *
  *   • COMMIT BEFORE REPLAY (design §4). The keyboard is the only way out of a
  *     trial, and "Hear it again" is deliberately NOT locked — locking it makes a
@@ -24,6 +24,14 @@
  *     different AudioContext and cannot see the drill's), so `audioBusy` here is
  *     the guard that makes "the app cannot hear its own tone" structural rather
  *     than hopeful.
+ *   • THE TUNER NEVER NAMES A PITCH BEFORE THE COMMIT. The stage header shows the
+ *     key, so a sung note's NAME is the degree by arithmetic with no ear involved
+ *     (change spec §0) — the readout is therefore DIRECTION only, ▲ higher /
+ *     ▼ lower / ✓ that's it, in BOTH drill modes, and the name comes back at
+ *     REVEAL where the answer is already committed. That is also what makes it
+ *     safe for the sing gate to demand a real match: "you are on the note" says
+ *     nothing about that note's FUNCTION in the key, which is the one thing this
+ *     app drills.
  *   • EVERY PLAYBACK IS SEQUENCED. `playSeq` is bumped by anything that
  *     invalidates a scheduled continuation — a replay, a pause, ending the
  *     session, a new trial — so a setTimeout that survives cannot advance a state
@@ -93,6 +101,18 @@
   var TICK_MS      = 400;   // HUD refresh; the ring must move smoothly, the clock
                             // only has to look alive.
 
+  // change spec §2's direction bands, in cents from the target pitch class.
+  // MATCH_CENTS is also the GRADING threshold: design §1 matches on the nearest
+  // semitone, so anything further out than half of one is a different note, not a
+  // flat one, and the gate must not accept it (change spec §3).
+  var MATCH_CENTS   = 50;   // |cents| <= this → '✓ that's it', .ok, gate satisfied
+  var NEAR_CENTS    = 150;  // |cents| <= this → .near, the right neighbourhood
+  // change spec §3's escape hatch. A drill that can trap a user who cannot match a
+  // pitch is worse than one that lets them through, so the answer unlocks after
+  // this many unmatched holds on ONE trial. It costs an assist, which is what
+  // keeps the end screen honest about how that trial was really answered.
+  var MAX_SING_MISS = 3;
+
   // design §12's DAW-standard virtual-keyboard mapping, plus the digit aliases.
   // Values are PITCH CLASSES above the tonic, which is what every answer path,
   // the CSS's .key[data-deg] positions and EarTheory.DEGREES all agree on.
@@ -113,16 +133,31 @@
   var BLACK = [1, 3, 6, 8, 10];
   var IS_BLACK = { 1: 1, 3: 1, 6: 1, 8: 1, 10: 1 };
 
-  // design §9. `custom` is not a preset — picking it opens the calibration flow.
-  var RANGES = [
-    { id: 'bass',     name: 'Bass · C2–E4',     lo: 40, hi: 64 },
-    { id: 'baritone', name: 'Baritone · G2–G4', lo: 43, hi: 67 },
-    { id: 'tenor',    name: 'Tenor · C3–A4',    lo: 48, hi: 69 },
-    { id: 'alto',     name: 'Alto · F3–D5',     lo: 53, hi: 74 },
-    { id: 'soprano',  name: 'Soprano · C4–A5',  lo: 60, hi: 81 },
-    { id: 'custom',   name: 'Custom — calibrate…', lo: 0, hi: 0 }
-  ];
-  var MIN_SPAN = 12, MAX_SPAN = 36;          // design §9's sane clamp
+  // design §9 + change spec §4. The preset TABLE lives in ear-theory.js, not here,
+  // so the default (`unisex`, F3–F4) has exactly one home: ear-store.js's DEFAULTS
+  // and EarTheory.playBand()'s fallback quote the same pair of numbers, and a
+  // preset added there shows up in this panel without an edit.
+  //
+  // `custom` is deliberately NOT in that table — it is not a range, it is the
+  // calibration flow — so it is appended here, last, where a "…" entry belongs.
+  var CUSTOM_RANGE = { id: 'custom', name: 'Custom — calibrate…', lo: 0, hi: 0 };
+  function voiceRanges() {
+    var src = EarTheory.VOICE_RANGES || [], out = [], i;
+    for (i = 0; i < src.length; i++) out.push(src[i]);
+    out.push(CUSTOM_RANGE);
+    return out;
+  }
+  // The human label is the table's own — change spec §4 wants "Everyone (F3–F4)",
+  // something a singer recognises, not an id. Both spellings are accepted so the
+  // panel cannot end up rendering an id, or an empty option, over a field name.
+  function rangeLabel(r) { return r.label || r.name || r.id; }
+
+  var MIN_SPAN = 12, MAX_SPAN = 36;          // design §9's sane clamp. The unisex
+                                             // preset is exactly one octave, so
+                                             // MIN_SPAN must stay INCLUSIVE here
+                                             // and in ear-store.js:245 or the
+                                             // default range fails its own
+                                             // validation (change spec §4).
 
   /* ====================== §3 state ====================== */
 
@@ -139,6 +174,12 @@
   var ctxLabel = '';                 // "B♭ · E♭ · F · B♭", for the ARMED sub-line
   var ticker = 0;
   var singing = false, shiftDown = false;
+  // change spec §3: the sing gate opens on a MATCH now, so the trial has to
+  // remember whether it was ever cleared (`gatePassed`) and how many holds have
+  // missed (`singMiss`, the escape hatch's counter). Both are per-trial and both
+  // are reset in beginTrial() — a miss count that survived into the next question
+  // would unlock it before the user had sung a note.
+  var singMiss = 0, gatePassed = false;
   var levelMoveMsg = '';             // set by auto-advance, shown on the end card
   var keyEls = {};                   // degree pc -> the <button class="key">
   var authUser = null;
@@ -176,6 +217,11 @@
   function drillMode()   { return sess ? sess.settings().mode : settings.mode; }
   function singGateOn()  { return sess ? !!sess.settings().singGate : !!settings.singGate; }
   function labelStyle()  { return settings.labels; }
+  // The voice range the SING TARGET is folded into (change spec §1). Session-first
+  // for the same reason as the rest: recalibrating mid-drill must not move the
+  // target of a question already on screen.
+  function voiceLo()     { return sess ? sess.settings().voiceLo : settings.voiceLo; }
+  function voiceHi()     { return sess ? sess.settings().voiceHi : settings.voiceHi; }
   function levelDegrees() {
     var list = sess ? sess.settings().degrees : EarTheory.levelFor(settings.level).degrees;
     var m = {}, i;
@@ -188,12 +234,17 @@
     for (var i = 0; i < items.length; i++) {
       var o = document.createElement('option');
       o.value = items[i].value; o.textContent = items[i].label;
+      // Optional per-option tooltip. change spec §4 wants the unisex preset to
+      // explain itself — that it is the span most people of any voice type can
+      // sing, and that Calibrate will fit it to them — and ear-theory.js's table
+      // carries that sentence as `hint`.
+      if (items[i].title) o.title = items[i].title;
       sel.appendChild(o);
     }
   }
 
   function buildSettingsOptions() {
-    var i, lv, items = [];
+    var i, lv, items = [], ranges;
     for (i = 0; i < EarTheory.LEVELS.length; i++) {
       lv = EarTheory.LEVELS[i];
       items.push({ value: String(lv.n), label: 'L' + lv.n + ' · ' + lv.name + ' — ' + lv.degrees.length + ' degrees' });
@@ -204,8 +255,11 @@
     for (i = 0; i < EarAudio.VOICES.length; i++) items.push({ value: EarAudio.VOICES[i], label: EarAudio.VOICES[i] });
     fillSelect($('setTimbre'), items);
 
+    ranges = voiceRanges();
     items = [];
-    for (i = 0; i < RANGES.length; i++) items.push({ value: RANGES[i].id, label: RANGES[i].name });
+    for (i = 0; i < ranges.length; i++) {
+      items.push({ value: ranges[i].id, label: rangeLabel(ranges[i]), title: ranges[i].hint || '' });
+    }
     fillSelect($('setRange'), items);
   }
 
@@ -272,8 +326,8 @@
       flash('Level ' + lv.n + ' · ' + lv.name);
     };
     $('setRange').onchange = function () {
-      var id = $('setRange').value, r = null, i;
-      for (i = 0; i < RANGES.length; i++) if (RANGES[i].id === id) r = RANGES[i];
+      var id = $('setRange').value, list = voiceRanges(), r = null, i;
+      for (i = 0; i < list.length; i++) if (list[i].id === id) r = list[i];
       if (!r || id === 'custom') { openCal(); return; }   // 'custom' means "measure me"
       var s = readControls();
       s.voiceRange = r.id; s.voiceLo = r.lo; s.voiceHi = r.hi;
@@ -440,9 +494,13 @@
       return;
     }
     if (phase === 'listen') {
-      setStage('Sing it back',
-               'Hold the sing control (or Shift) and match the note you just heard. ' +
-               'Naming it unlocks as soon as a steady pitch is caught.');
+      // change spec §5: an instruction, not an invitation, and it no longer
+      // promises that any steady pitch unlocks the keyboard — since change spec §3
+      // the gate wants the RIGHT pitch, and copy that says otherwise reads as a
+      // bug the first time a wrong note is refused. index.html:105's legend still
+      // teaches the Shift equivalent, so the sub-line does not repeat it.
+      setStage('Sing that note.',
+               'Hold the sing control and match the pitch you just heard.');
       return;
     }
     if (phase === 'answer') {
@@ -645,6 +703,10 @@
     showTuner(false);
     try { trial = sess.next(); }
     catch (e) { flash('The question generator failed — ending the session.'); finishSession(); return; }
+    // change spec §3: both gate counters are per-TRIAL. Resetting them here, at
+    // the one place a new question is drawn, is what keeps the escape hatch from
+    // carrying three old misses into a question the user has not heard yet.
+    singMiss = 0; gatePassed = false;
     phase = 'armed'; armedStage = 'context';
     if (!trial.playContext) ctxLabel = '';
     renderAll();
@@ -677,7 +739,13 @@
   function toAnswerable() {
     // The gate is skipped when the mic is not actually available: a stored
     // singGate must never be able to make a trial unanswerable.
-    if (drillMode() === 'identify' && singGateOn() && EarPitch.enabled() && trial.cents == null) {
+    //
+    // The "already sung" test is `gatePassed`, NOT `trial.cents != null` as it was
+    // before change spec §3. Those two came apart the moment a match was required:
+    // an unmatched hold still records its signed deviation on the trial (the
+    // intonation stat wants every error, handleSung() below), so cents alone would
+    // now hand the keyboard to a user who sang the wrong note.
+    if (drillMode() === 'identify' && singGateOn() && EarPitch.enabled() && !gatePassed) {
       phase = 'listen';
     } else {
       phase = 'answer';
@@ -787,7 +855,20 @@
 
   function showTuner(on) {
     show($('tuner'), on);
-    if (!on) $('tuner').classList.remove('ok');
+    if (!on) tunerClass('');
+  }
+
+  // .ok and .near are mutually exclusive and learn.css hangs both off #tuner, so
+  // they are always written together — a stale .near left under a fresh .ok is the
+  // one combination that would paint the readout two colours at once. Note that
+  // .ok has CHANGED MEANING with change spec §2: it used to be ear-pitch.js's
+  // stability lock, and it is now "you are on the note". The lock itself did not
+  // go anywhere — it is still what endHold() hands back — but the state worth
+  // colouring is the one the gate turns on.
+  function tunerClass(cls) {
+    var t = $('tuner');
+    t.classList.toggle('ok', cls === 'ok');
+    t.classList.toggle('near', cls === 'near');
   }
 
   function startSing() {
@@ -799,8 +880,10 @@
     singing = true;
     $('btnSing').classList.add('holding');
     $('tunerNote').textContent = '—';
-    $('tunerCents').textContent = 'sing…';
+    $('tunerCents').textContent = 'sing…';     // change spec §5: unchanged wording
     $('tunerNeedle').style.left = '50%';
+    tunerClass('');                            // a match from the PREVIOUS hold must
+                                               // not still be lit when this one opens
     showTuner(true);
     renderActions();
   }
@@ -818,25 +901,88 @@
 
   function onSingFrame(f) {
     if (f.midi == null) {
+      // Nothing to point at, so the direction slot holds the same em dash
+      // startSing() opens with rather than a stale instruction (change spec §2).
       $('tunerNote').textContent = '—';
       $('tunerCents').textContent = f.rms < EarPitch.RMS_MIN ? 'louder' : 'steady…';
       $('tunerNeedle').style.left = '50%';
-    } else {
-      var tonic = trial ? trial.tonicPc : 0, mode = trial ? trial.mode : 'major';
-      $('tunerNote').textContent = EarTheory.noteName(f.midi, tonic, mode);
-      $('tunerCents').textContent = (f.cents > 0 ? '+' : '') + f.cents + '¢';
-      // learn.css translateX(-50%) makes this percentage the needle's CENTRE, so
-      // 50% is dead in tune and ±50 cents reaches the ends of the bar.
-      $('tunerNeedle').style.left = Math.max(0, Math.min(100, 50 + f.cents)) + '%';
+      tunerClass('');
+      return;
     }
-    // The lock confirmation. `accepted` is REPLACED every frame while the voice
-    // stays steady, so identity comparison would never show an edge; `stable` is
-    // the per-frame gate result, and toggling the class off it lights the readout,
-    // the needle and the bar frame together the instant the pitch is taken.
-    $('tuner').classList.toggle('ok', !!f.stable);
+    renderDirection(centsToTarget(f));
   }
 
-  // Signed cents from the nearest instance of pitch class `pc`, folded to ±600.
+  /* ---- the direction readout ----------------------------------------------
+   * change spec §0 and §2. What used to be here was EarTheory.noteName() of the
+   * pitch the user had just sung — and the stage header shows the key, so a name
+   * plus one subtraction IS the degree, with no ear involved anywhere. That is
+   * the leak this readout replaces, and it is why nothing below ever renders a
+   * note name, a solfège syllable or a degree. The name comes back at REVEAL
+   * (renderStage() above), where the answer is already committed and naming it is
+   * the whole point of the study phase.
+   *
+   * Telling the user they are ON the note leaks nothing: matching a pitch by ear
+   * says nothing about that pitch's FUNCTION in the key, and the function is the
+   * only thing being drilled.
+   *
+   * SIGN CONVENTION — an inverted needle is the single most noticeable bug this
+   * file could ship, so it is spelled out here rather than left to be re-derived:
+   *
+   *     cents > 0  →  the singer is SHARP, above the target  →  "▼ lower"
+   *     cents < 0  →  the singer is FLAT,  below the target  →  "▲ higher"
+   *
+   * centsFromPc() produces exactly that sign (a voice a quarter-tone above the
+   * target reads +50), and the needle inherits it: 50 + cents puts a sharp singer
+   * to the RIGHT of centre, like every hardware tuner ever built.
+   * ---------------------------------------------------------------------- */
+  function renderDirection(cents) {
+    var mag = Math.abs(cents), sharp = (cents > 0), word, coach, cls;
+    if (mag <= MATCH_CENTS) {
+      word = '✓ that\'s it'; coach = 'hold it';   cls = 'ok';
+    } else if (mag <= NEAR_CENTS) {
+      word = sharp ? '▼ lower' : '▲ higher'; coach = 'almost';     cls = 'near';
+    } else {
+      word = sharp ? '▼ lower' : '▲ higher'; coach = 'keep going'; cls = '';
+    }
+    $('tunerNote').textContent  = word;
+    $('tunerCents').textContent = coach;
+    // Unchanged geometry: learn.css translateX(-50%) makes this percentage the
+    // needle's CENTRE, so 50% is matched and ±50 cents reaches the ends of the
+    // bar. Cents now run to ±600 (a tritone away is the worst case), so the clamp
+    // that used to be belt-and-braces is what pins the needle to an end.
+    $('tunerNeedle').style.left = Math.max(0, Math.min(100, 50 + cents)) + '%';
+    tunerClass(cls);
+  }
+
+  // The pitch class the user is being asked to SING. The PLAYED note keeps its
+  // random register — that is level 4+'s whole point — while the sung target is
+  // that note's pitch class folded into the singer's own range (change spec §1),
+  // because male and female comfortable ranges sit about an octave apart.
+  //
+  // Every comparison in this file is mod 12 (design §1: degrees are
+  // octave-invariant, so an octave displacement must be ACCEPTED, not punished),
+  // which is what makes the fallback exact rather than approximate: an
+  // ear-theory.js without singTarget() leaves the played note itself, and the
+  // played note is already an instance of the right pitch class.
+  function singTargetPc() {
+    if (!trial) return 0;
+    if (typeof EarTheory.singTarget === 'function') {
+      return norm12(EarTheory.singTarget(trial.midi, voiceLo(), voiceHi()));
+    }
+    return norm12(trial.midi);
+  }
+
+  // The ONE cents path: both the live readout and the gate grade through this, so
+  // there is no second convention to get out of step with the first. `got` is any
+  // {midi, cents} — an onSingFrame frame or endHold()'s accepted pitch.
+  function centsToTarget(got) {
+    return centsFromPc(got.midi + got.cents / 100, singTargetPc());
+  }
+
+  // Signed cents from the NEAREST instance of pitch class `pc`, folded to ±600 —
+  // which is exactly what change spec §2 wants the direction computed against, an
+  // octave displacement reading as zero error rather than 1200.
+  //
   // design §11 asks for the deviation from the TARGET, reported "regardless" of
   // whether the pitch class came out right, so a wrong note honestly contributes
   // its whole error to the intonation stat instead of a flattering near-zero.
@@ -850,15 +996,23 @@
   function handleSung(got) {
     if (!sess || !trial) { showTuner(false); return; }
     if (!got) {
+      // A hold that produced no usable pitch is not an ATTEMPT — the user never
+      // offered a note to match — so it deliberately does not spend one of the
+      // escape hatch's three. It also cannot trap anyone the old gate would not
+      // have trapped: that one needed a steady pitch too.
       $('tunerCents').textContent = 'no pitch';
-      $('tuner').classList.remove('ok');
+      tunerClass('');
       flash('No steady pitch caught — hold a little longer and sing straight through.');
       return;
     }
-    var contMidi = got.midi + got.cents / 100;
-    var targetPc = norm12(trial.midi);
-    var cents = centsFromPc(contMidi, targetPc);
+    var cents = centsToTarget(got);
+    // ALWAYS, and with the sign and the full magnitude intact, matched or not
+    // (change spec §3): clamping a miss towards zero would flatter the intonation
+    // stat with an error the singer never actually sang.
     sess.singResult(cents);
+    // Repaint from the ACCEPTED pitch rather than leaving whatever the last rAF
+    // frame happened to catch on screen — that is the reading the gate just judged.
+    renderDirection(cents);
 
     if (drillMode() === 'produce') {
       // Degrees are octave-invariant (design §1), so the sung OCTAVE is free and
@@ -866,13 +1020,41 @@
       var res = sess.answer(norm12(got.pc - trial.tonicPc));
       if (res) { enterReveal(res); return; }
     }
-    if (phase === 'listen') {                 // the gate is satisfied by a pitch,
-      phase = 'answer';                       // never by a CORRECT pitch — that
-      sess.ready();                           // would make the gate the answer
-      renderAll();
+    if (phase === 'listen') {
+      // THE GATE NEEDS A MATCH (change spec §3). It used to open on any steady
+      // pitch, and the comment here used to explain that a correct pitch must not
+      // be required "or the gate becomes the answer". That reasoning was sound
+      // while the tuner NAMED what was sung — the readout would have spelled the
+      // degree out. It is gone with the name (change spec §0): the readout now
+      // says only higher/lower/that's it, which tells the user nothing about the
+      // note's function in the key, so demanding a real match costs no secret and
+      // buys the thing the gate was for — that the note was actually heard.
+      if (Math.abs(cents) <= MATCH_CENTS) { openGate(); return; }
+      singMiss++;
+      if (singMiss >= MAX_SING_MISS) {
+        // The escape hatch. Charged as one assist, exactly like "Hear it again",
+        // so a session that was ground through this way still reads as one on the
+        // end card instead of looking like clean work.
+        sess.assist();
+        flash('Moving on — that one is hard to match.');
+        openGate();
+        return;
+      }
+      flash('Not that one — listen again and match the pitch.');
       return;
     }
     renderStage();
+  }
+
+  // The one way out of LISTEN. renderAll() rather than renderStage() because the
+  // keyboard has just become live, ▸ Next has not, and the escape hatch may have
+  // moved the assist count on the HUD.
+  function openGate() {
+    gatePassed = true;
+    phase = 'answer';
+    sess.ready();          // design §8's response clock, at the instant the trial
+                           // actually became answerable
+    renderAll();
   }
 
   function wireSing() {
@@ -1030,12 +1212,27 @@
 
   function calOpen()  { return $('calOverlay').style.display !== 'none'; }
 
+  /* Calibration PAUSES a running drill first, for two independent reasons.
+   *
+   * The behavioural one: calibrating rewrites settings.voiceLo/voiceHi, and
+   * EarTheory.singTarget() folds every sung target into that band — so
+   * re-measuring mid-session would move the targets under a session already
+   * scoring against the old ones, and the intonation stat would silently mix
+   * two different drills.
+   *
+   * The integrity one: this overlay is the ONE place that still names a sung
+   * pitch (learn.js:1299, and naming is its whole job — you cannot report a
+   * measured range without note names). Left reachable mid-trial it would be a
+   * lookup table for the very leak change spec §0 closed: sing the test note,
+   * open Calibrate, sing it again, read the name, subtract the displayed tonic.
+   * Pausing shuts that path without crippling calibration itself. */
   function openCal() {
     if (!EarPitch.supported()) {
       flash('No microphone API in this browser, so the range cannot be measured. Pick a preset instead.');
       fillControls();
       return;
     }
+    if (sess && phase !== 'paused') togglePause();
     requireMic().then(function () {
       cal.step = 1; cal.lo = null; cal.hi = null;
       renderCal('');
