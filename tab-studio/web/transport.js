@@ -37,6 +37,28 @@ var Transport = (function () {
       var el = cfg.audios && cfg.audios[k];
       if (el) el.addEventListener('ended', function () { if (source === k) finalize(); });
     });
+    // The YouTube player is the one engine that can start and stop WITHOUT this
+    // transport asking — the user presses ▶ inside the video. On an iPad that is
+    // not a curiosity, it is the only way playback ever begins: Safari refuses a
+    // scripted playVideo() into a cross-origin iframe, so the transport's own ▶
+    // is blocked and a tap on the player is the whole remedy (see youtube.js).
+    // Adopting it here is what makes the tab follow; without it the video plays
+    // to an audience of a frozen playhead.
+    if (cfg.youtube && cfg.youtube.setOnState) cfg.youtube.setOnState(onYtState);
+  }
+
+  function onYtState(playing) {
+    if (!isYt()) return;                       // another source owns the transport
+    if (playing && !running) {
+      if (metroOn) Metronome.prime();
+      Metronome.reset();
+      running = true; stopRaf(); frame();
+    } else if (!playing && running) {
+      // Deliberately no enginePause(): the player has ALREADY stopped, and
+      // pausing it again from inside its own state callback is how feedback
+      // loops start. Just take the transport down with it.
+      running = false; stopRaf(); Metronome.stop(); emit();
+    }
   }
 
   function isMelodic() { return view !== 'drumtab'; }

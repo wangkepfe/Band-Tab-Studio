@@ -486,7 +486,9 @@
     }
     if (phase === 'armed') {
       if (armedStage === 'context') {
-        setStage(trial.context === 'drone' ? 'Tonic drone…' : 'Setting the key…',
+        setStage(trial.context === 'drone' ? 'Tonic drone…'
+               : trial.context === 'tonic' ? 'Reference note…'
+               : 'Setting the key…',
                  ctxLabel ? ctxLabel + '  in ' + EarTheory.keyLabel(trial.tonicPc, trial.mode) : '');
       } else {
         setStage('Listen…', 'Question ' + trial.n + ' — hold the tonic in your head.');
@@ -634,7 +636,11 @@
   function ensureDrone() { if (droneMidi != null) EarAudio.startDrone(droneMidi); }
 
   function playContextNow(t, seq, done) {
-    var chords = EarTheory.cadence(t.context, t.tonicPc, t.mode);
+    // t.tonicMidi is the instance of the tonic this trial's degree was measured
+    // up from (ear-session.js), and cadence() honours it for the 'tonic' context
+    // alone — a reference note in the wrong octave would sound a different
+    // interval from the one the user is being asked to name.
+    var chords = EarTheory.cadence(t.context, t.tonicPc, t.mode, t.tonicMidi);
     if (t.context === 'drone') {
       // cadence('drone') returns exactly one entry with a SINGLE midi, so this
       // goes straight to startDrone rather than through playCadence.
@@ -643,6 +649,19 @@
       EarAudio.startDrone(droneMidi);
       renderStage();
       playTimer = setTimeout(function () { if (seq === playSeq) done(); }, DRONE_SETTLE * 1000);
+      return;
+    }
+    if (t.context === 'tonic') {
+      // The plainest context there is: sound the 1 once and stop. It is a NOTE,
+      // not a chord and not a drone, so it goes through playNoteNow rather than
+      // playCadence — and in CAD_VOICE, because design §7 fixes the context voice
+      // even when the test note's timbre is random. Its length comes from the
+      // entry's own `beats` at CAD_BPM, so the reference is timed by the same
+      // clock as the cadence it replaces rather than by a second constant here.
+      ctxLabel = EarTheory.label(0, labelStyle()) + ' = ' + chords[0].name;
+      renderStage();
+      playNoteNow(chords[0].midis[0], CAD_VOICE, chords[0].beats * 60 / CAD_BPM,
+                  LEAD_SEC, seq, done);
       return;
     }
     var names = [], i;
@@ -788,19 +807,38 @@
 
   // design §4: the escape hatch is available but COUNTED. ear-session.js:326 makes
   // it free once the trial is answered, so this can call assist() unconditionally.
+  //
+  // "Hear it again" replays the whole TRIAL, not just its test note: the I–IV–V–I
+  // reference goes first and the note lands after it, exactly as presentTrial()
+  // sounded them. A bare note is no help to the person actually pressing this —
+  // the question is "which degree is this *in this key*", and the key is the half
+  // that fades, especially on the tapered trials that never played a cadence of
+  // their own. A drone is the one context with nothing to re-establish: it has
+  // been sounding the whole time, so there the replay is still just the note.
   function replay() {
     if (!sess || !trial || audioBusy) return;
     if (phase !== 'listen' && phase !== 'answer' && phase !== 'reveal') return;
     endSing();
     sess.assist();
     var seq = beginPlayback();
-    if (drillMode() === 'produce' && phase !== 'reveal') {
-      // Replaying the target in produce mode would BE the answer, so the escape
-      // hatch there re-establishes the key instead.
-      playContextNow(trial, seq, function () { audioBusy = false; renderActions(); });
+    // Produce mode names the degree instead of playing it, so sounding the target
+    // before the reveal would BE the answer: there the replay stops at the key.
+    var withNote = (drillMode() !== 'produce' || phase === 'reveal');
+    var finish   = function () { audioBusy = false; renderActions(); };
+    var sayNote  = function (lead) {
+      playNoteNow(trial.midi, trial.voice, NOTE_SEC, lead, seq, finish);
+    };
+
+    if (trial.context === 'drone') {
+      ensureDrone();
+      if (withNote) sayNote(LEAD_SEC); else finish();
     } else {
-      playNoteNow(trial.midi, trial.voice, NOTE_SEC, LEAD_SEC, seq, function () {
-        audioBusy = false; renderActions();
+      playContextNow(trial, seq, function () {
+        if (seq !== playSeq) return;
+        // GAP_SEC, not LEAD_SEC: the silence after the cadence is what separates
+        // the reference from the question, and it has to be the same silence the
+        // trial was first presented with.
+        if (withNote) sayNote(GAP_SEC); else finish();
       });
     }
     renderActions();

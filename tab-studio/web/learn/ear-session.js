@@ -171,8 +171,12 @@ var EarSession = (function () {
     var degrees  = (def.degrees || []).slice();   // copy: the UI gets this array
     var tonality = (def.mode === 'minor') ? 'minor' : 'major';
     var drill    = (settings.mode === 'produce') ? 'produce' : 'identify';
+    // 'tonic' is the plainest of the four: one reference note, the 1, and nothing
+    // harmonic at all. It tapers and re-establishes exactly like a cadence — only
+    // the drone is exempt from that (see contextDue below) — so it needs no
+    // special case beyond being an accepted value.
     var context  = (settings.context === 'ii-V-I' || settings.context === 'drone' ||
-                    settings.context === 'cadence')
+                    settings.context === 'tonic'  || settings.context === 'cadence')
                  ? settings.context
                  : (level >= 4 ? 'ii-V-I' : 'cadence');           // design §6
     var taper    = normTaper(settings.taper, level, def);
@@ -281,12 +285,24 @@ var EarSession = (function () {
       // that are the app's fault, not the ear's.
       var moved = (qstate.prevTonicPc === null || tonicPc !== qstate.prevTonicPc);
 
+      // The instance of the tonic this question's degree was measured up from, not
+      // merely some octave of its pitch class: the 'tonic' context sounds it as the
+      // reference note, and a different octave would make the interval the user
+      // hears disagree with the degree they are asked to name. A theory stub that
+      // returns no tonicMidi (the test seam) still yields a correct one — the test
+      // note minus its degree is a tonic instance at or below it.
+      var testMidi  = Math.round(num(q.midi));
+      var tonicMidi = (q.tonicMidi == null || !isFinite(Number(q.tonicMidi)))
+                    ? testMidi - pc12(q.degree)
+                    : Math.round(num(q.tonicMidi));
+
       var trial = {
         n: index + 1,
         tonicPc: tonicPc,
         mode: (q.mode === 'minor' ? 'minor' : tonality),   // TONALITY, not drill
         degree: pc12(q.degree),
-        midi: Math.round(num(q.midi)),
+        midi: testMidi,
+        tonicMidi: tonicMidi,
         // A fixed timbre setting is authoritative; only 'random' defers to the
         // per-question draw (design §7).
         voice: (voice === 'random' ? (q.voice || 'organ') : voice),

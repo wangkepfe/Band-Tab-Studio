@@ -137,11 +137,26 @@ audio{height:34px;max-width:340px;width:100%;margin-top:2px}
   border-top:1px solid var(--line);pointer-events:none;height:22px}
 .statusbar .grow{flex:1}
 
-/* show/hide the per-view settings toolbar + the viewbar's secondary settings —
-   frees the workspace (flex:1) for the tab. The view tabs, transport, track switch
-   and the ⚙ toggle itself stay visible. */
+/* ============ fold / unfold the settings panels ============ */
+/* One toggle ("▴ Panels", or F) folds EVERY settings surface away so the workspace —
+   flex:1 — gets the rest of the screen. It earns its keep on an iPad, where the header,
+   the track strip and both control bars each wrap onto a second row and together eat
+   roughly a third of a 768pt landscape screen; on a PC it buys back ~200px of tab.
+   What deliberately survives the fold is the .viewbar: it carries the toggle that
+   unfolds again, plus the view tabs and the transport — exactly what you still need
+   while playing along, and nothing you need to *set*. */
+body.settings-collapsed header,
+body.settings-collapsed .workflow,
+body.settings-collapsed .trackbar,
 body.settings-collapsed .toolbar.viewtools{display:none !important}
 body.settings-collapsed .settings-extra{display:none !important}
+/* 32px, not .btn.sm's 24px: this is the one control you actually aim a finger at on
+   an iPad, and it lines up with the .icon transport buttons sharing the viewbar. */
+.fold-btn{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+  min-height:32px;padding:5px 11px}
+/* The caret is sized down so it reads as a disclosure marker beside the word rather
+   than a glyph competing with it. ▴ = fold up, ▾ = bring them back down. */
+.fold-caret{font-size:10px;line-height:1;opacity:.75}
 
 /* floating zoom control for the bass/guitar tab (always reachable, even settings hidden) */
 .zoomctl{position:absolute;right:14px;bottom:30px;z-index:6;display:flex;align-items:stretch;
@@ -271,10 +286,12 @@ body.sheet-on .drum-grid-wrap{flex:1 1 58%}
      guarantee the workspace a usable height instead of clipping everything below. */
   body{overflow-y:auto;overflow-x:hidden;-webkit-text-size-adjust:100%}
   .workspace{flex:1 0 auto;min-height:60vh}
-  /* collapsed: give the tab a tall floor, but KEEP the page scrollable so that on a
-     very narrow/short screen (tall wrapped chrome) the ⚙ toggle stays reachable —
-     never trap the user in a zero-height, no-scroll workspace. */
-  body.settings-collapsed .workspace{min-height:82vh}
+  /* folded: give the tab a tall floor, but KEEP the page scrollable so that on a
+     very narrow/short screen (the viewbar still wraps onto 2–3 rows here) the fold
+     toggle stays reachable — never trap the user in a zero-height, no-scroll
+     workspace. Only the viewbar is left above it, hence the taller floor than the
+     unfolded 60vh. */
+  body.settings-collapsed .workspace{min-height:88vh}
 
   /* header: wrap; the project name fills its row, the buttons wrap below it */
   header{flex-wrap:wrap;gap:8px;padding:8px 10px}

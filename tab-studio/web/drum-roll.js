@@ -772,6 +772,11 @@ var DrumRoll = (function () {
 
       getEvents: function () { return st.events; },
       render:    render,
+      // render() draws at the CURRENT W/H; only resize() re-measures the parent and
+      // resizes the backing store. Exported because the panel fold changes the pane's
+      // height with no window resize event behind it, and the ResizeObserver above is
+      // rAF-driven — so the shell asks for the re-measure directly. resize() renders.
+      resize:    resize,
       debug:     function () { return { zoom: st.zoom, scrollX: st.scrollX, tool: st.tool, sel: st.sel.size, events: st.events.length, playhead: st.playhead }; },
     };
   }

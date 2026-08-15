@@ -237,7 +237,7 @@ var BassTabView = (function () {
 
       // per-note start column + end column. End is the note's real end, capped at
       // the next onset on the SAME string so duration boxes never overlap.
-      var noteCol = {}, noteEndCol = {};
+      var noteCol = {}, noteEndCol = {}, nextOnsetCol = {};
       cols.forEach(function (c) { c.noteIdx.forEach(function (i) { noteCol[i] = c.col; }); });
       var onsetByStr = {};
       r.notes.forEach(function (n, i) {
@@ -249,6 +249,7 @@ var BassTabView = (function () {
         var p = r.fingering.positions[i], scol = noteCol[i] || 0, raw = Math.round(n.end / grid), cap = Infinity;
         if (p) { var arr = onsetByStr[p.string] || []; for (var k = 0; k < arr.length; k++) { if (arr[k] > scol) { cap = arr[k]; break; } } }
         noteEndCol[i] = Math.min(Math.max(scol + 1, raw), cap);
+        nextOnsetCol[i] = cap;
       });
 
       var colsPerBeat = Math.max(1, Math.round((song.ppq * 4 / ts.den) / grid));
@@ -366,7 +367,13 @@ var BassTabView = (function () {
             var d = DIFF[diffArr[i] || 'easy'], yy = yOf(p.string), yTop = yy - badgeH / 2;
             var x0 = X2(onset ? a : startC), x1;
             if (openR) x1 = W - 6;                          // run off the row's right edge
-            else if (onset) x1 = Math.max(X2(z), x0 + (p.fret >= 10 ? 17 : 13));  // floor width so the number stays legible
+            else if (onset) {
+              // floor width so the number stays legible — but never past the next
+              // onset on this string, or dense passages would stack pills on top of
+              // each other and bury the fret numbers underneath.
+              var nx = nextOnsetCol[i], xLim = (nx != null && isFinite(nx)) ? X2(nx) : Infinity;
+              x1 = Math.min(Math.max(X2(z), x0 + (p.fret >= 10 ? 17 : 13)), xLim);
+            }
             else x1 = X2(z);
             if (x1 > W - 6) x1 = W - 6;
             if (x1 < x0 + 4) x1 = x0 + 4;
@@ -376,7 +383,15 @@ var BassTabView = (function () {
             svg += '<path d="' + pillPath(x0, yTop, x1 - x0, badgeH, !openL, !openR) + '" fill="' + d.fill + '"' + (onset ? '' : ' fill-opacity="0.8"') + ' stroke="' + (ov ? pal.accent : d.stroke) + '" stroke-width="' + (ov ? 1.8 : 1.3) + '"/>';
             if (onset) {
               var numX = openR ? (x0 + (p.fret >= 10 ? 11 : 9)) : (x0 + (x1 - x0) / 2);
-              svg += '<text x="' + numX + '" y="' + (yy + 4) + '" text-anchor="middle" fill="' + d.text + '" font-family="monospace" font-size="12" font-weight="700">' + p.fret + '</text>';
+              // shrink the fret number (and only it) when the pill is too narrow to
+              // hold it at full size — a dense line of two-digit frets otherwise
+              // spills its digits past the box edges.
+              var lbl = '' + p.fret, fs = 12;
+              if (!openR) {
+                var fit = (x1 - x0 - 2) / (0.6 * lbl.length);   // monospace advance ≈ 0.6em
+                if (fit < fs) fs = Math.max(7, Math.round(fit * 10) / 10);
+              }
+              svg += '<text x="' + numX + '" y="' + (yy + fs / 3) + '" text-anchor="middle" fill="' + d.text + '" font-family="monospace" font-size="' + fs + '" font-weight="700">' + lbl + '</text>';
               if (showFing && p.finger > 0)
                 svg += '<text x="' + (x0 + 2) + '" y="' + (yTop - 2) + '" fill="' + pal.finger + '" font-size="9" font-family="monospace">' + p.finger + '</text>';
               if (ov) {

@@ -82,7 +82,7 @@
 
     <div class="stage-actions">
       <button class="btn primary" id="btnStart" type="button">▶ Start</button>
-      <button class="btn"      id="btnAgain" type="button" title="Replay — counted as an assist before you commit, free afterwards">♪ Hear it again</button>
+      <button class="btn"      id="btnAgain" type="button" title="Replay the key, then the note — counted as an assist before you commit, free afterwards">♪ Hear it again</button>
       <button class="btn hold" id="btnSing"  type="button">🎤 Hold to sing</button>
       <button class="btn"      id="btnNext"  type="button">Next ▸</button>
       <button class="btn"      id="btnPause" type="button" title="Pause (Esc)">❚❚ Pause</button>
@@ -139,8 +139,12 @@
     </select>
   </div>
 
+  <!-- Ordered easiest first. 'tonic' is the entry rung: one reference note and no
+       harmony to hold, for when a four-chord cadence is more than the ear can
+       carry while also naming a degree. -->
   <div class="set-row"><span>Key context</span>
     <select id="setContext">
+      <option value="tonic">Reference note — just the 1 (do), then the note</option>
       <option value="cadence">Cadence — I · IV · V · I</option>
       <option value="ii-V-I">ii–V–I — the jazz cadence</option>
       <option value="drone">Drone — a sustained tonic under everything</option>

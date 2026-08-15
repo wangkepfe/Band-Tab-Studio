@@ -133,7 +133,17 @@ fs.writeFileSync(path.join(OUT, '_headers'),
 `/*
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
-  Referrer-Policy: no-referrer
+  # NOT no-referrer. The YouTube "Song" source is a cross-origin iframe
+  # navigation from this document, and youtube.com refuses to play for an
+  # embedder it can't name — PLAYABILITY_ERROR_CODE_EMBEDDER_IDENTITY_
+  # MISSING_REFERRER, which reaches the page as onError 153. It worked on
+  # desktop only by accident: YouTube's own widget API sets
+  # referrerpolicy="strict-origin-when-cross-origin" on the iframe element it
+  # builds, and an element-level policy overrides the document's — so the whole
+  # feature was resting on an attribute we don't control, which iPadOS Safari
+  # does not always honour. strict-origin sends the ORIGIN only, never a path,
+  # so nothing no-referrer was protecting actually leaks.
+  Referrer-Policy: strict-origin-when-cross-origin
   Cache-Control: no-cache
 /config.js
   Cache-Control: no-store

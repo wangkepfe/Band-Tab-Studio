@@ -44,7 +44,7 @@
  *   EarTheory.degreeOf(midi, tonicPc)        — 0…11
  *   EarTheory.midiForDegree(deg, tonicPc, oct) — MIDI of a degree over a tonic
  *   EarTheory.label(deg, style)              — '♭3' | 'me' | '♭3 · me'
- *   EarTheory.cadence(kind, tonicPc, mode)   — [{midis,beats,roman,name}]
+ *   EarTheory.cadence(kind, tonicPc, mode, refMidi) — [{midis,beats,roman,name}]
  *   EarTheory.playBand(voiceLo, voiceHi, spread) — {lo,hi} MIDI band for test notes
  *   EarTheory.voiceRangeFor(id)              — VOICE_RANGES lookup, null if unknown
  *   EarTheory.singTarget(midi, voiceLo, voiceHi) — the instance of midi to sing back
@@ -330,14 +330,26 @@ var EarTheory = (function () {
   }
 
   // kind 'cadence' → I–IV–V–I, 'ii-V-I' → the jazz cadence, 'drone' → one held
-  // tonic. Returns [{midis, beats, roman, name}]; `beats` is relative, the caller
+  // tonic, 'tonic' → the bare reference note: the 1 sounded once and then gone.
+  // Returns [{midis, beats, roman, name}]; `beats` is relative, the caller
   // multiplies by 60/bpm. For 'drone' the single entry's beats is nominal — the
   // drone is sustained indefinitely by EarAudio.startDrone(midis[0]) (contract §F).
-  function cadence(kind, tonicPc, mode) {
+  //
+  // `refMidi` is honoured by 'tonic' ALONE, and it matters: nextQuestion() returns
+  // tonicMidi, the exact instance of the tonic the trial's degree was measured up
+  // from, and a reference note in some other octave would make the interval the
+  // user actually hears differ from the one they are being asked to name. Every
+  // other kind ignores it — the drone belongs in the bass because it sustains
+  // under everything, and a cadence has its own voice leading.
+  function cadence(kind, tonicPc, mode, refMidi) {
     tonicPc = norm12(tonicPc);
     var m = isMinor(mode) ? 'minor' : 'major';
-    if (kind === 'drone') {
-      return [ { midis: [seatIn(tonicPc, BASS_LO)], beats: 4,
+    if (kind === 'drone' || kind === 'tonic') {
+      var seat = (kind === 'tonic' && refMidi != null && isFinite(refMidi))
+               ? Math.round(refMidi) : seatIn(tonicPc, BASS_LO);
+      // Two beats at the reference tempo — about 1.4 s, long enough to settle in
+      // the ear and short enough that it is not mistaken for a drone.
+      return [ { midis: [seat], beats: (kind === 'tonic' ? 2 : 4),
                  roman: m === 'minor' ? 'i' : 'I', name: spellDegree(0, tonicPc, mode) } ];
     }
     var prog = (PROG[kind] || PROG['cadence'])[m];
@@ -497,14 +509,19 @@ var EarTheory = (function () {
    *   lastDegrees   [deg, …]        — recent degrees, MOST RECENT FIRST (2 is enough)
    *   voiceLo       MIDI            — singer's low note   (design §9)
    *   voiceHi       MIDI            — singer's high note
-   *   context       'cadence'|'ii-V-I'|'drone'   — informational here; the caller
-   *                                 decides what to PLAY when newKey is true
+   *   context       'cadence'|'ii-V-I'|'drone'|'tonic'  — informational here; the
+   *                                 caller decides what to PLAY when newKey is true
    *   taper         1|2|4|8|0       — re-establish every N questions, 0 = once per
    *                                 session. Omitted → the level's default.
    *   voice         'random' | one of VOICES   — optional; omitted means random
    * }
    *
-   * Returns {tonicPc, mode, degree, midi, voice, newKey}.
+   * Returns {tonicPc, mode, degree, midi, tonicMidi, voice, newKey}.
+   *
+   * `tonicMidi` is the seat — the instance of the tonic this question's degree was
+   * measured up from, so `midi` is always tonicMidi + degree (+12 at spread 2).
+   * The 'tonic' context sounds exactly that note as its reference, which is why it
+   * is returned rather than left to be re-derived from a pitch class.
    *
    * rnd() is consumed in a fixed order so seeded tests can predict it:
    *   key (only when the key changes) → degree → octave (only when spread is 2)
@@ -567,7 +584,8 @@ var EarTheory = (function () {
     // just sounding thin. A user-pinned timbre is never overridden.
     if (!fixed && midi < 45 && THIN_LOW[voice]) voice = 'bass';
 
-    return { tonicPc: tonicPc, mode: lv.mode, degree: degree, midi: midi, voice: voice, newKey: newKey };
+    return { tonicPc: tonicPc, mode: lv.mode, degree: degree, midi: midi,
+             tonicMidi: seat, voice: voice, newKey: newKey };
   }
 
   var api = {

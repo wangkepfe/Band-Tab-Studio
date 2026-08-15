@@ -589,6 +589,19 @@ var dr = Theory.cadence('drone', 3, 'major');
 ok(dr.length === 1 && dr[0].midis.length === 1 && dr[0].midis[0] % 12 === 3 &&
    dr[0].midis[0] >= 48 && dr[0].midis[0] <= 59,
    'drone is one sustained tonic in the bass octave (MIDI ' + dr[0].midis[0] + ')');
+// The 'tonic' context is the entry rung of the ladder: one reference note, the
+// 1, and no harmony at all. Shaped like the drone — a single midi — but seated
+// where the CALLER asks, because the note the user hears has to be the exact
+// instance the trial's degree was measured up from, not merely some octave of
+// the right pitch class.
+var tn = Theory.cadence('tonic', 3, 'major');
+ok(tn.length === 1 && tn[0].midis.length === 1 && tn[0].midis[0] % 12 === 3 &&
+   tn[0].beats > 0 && !!tn[0].name,
+   'the tonic context is one labelled reference note (MIDI ' + tn[0].midis[0] + ')');
+ok(Theory.cadence('tonic', 3, 'major', 63)[0].midis[0] === 63,
+   'and it takes the seat the caller passes, so the reference is the note the degree was measured from');
+ok(Theory.cadence('drone', 3, 'major', 63)[0].midis[0] === dr[0].midis[0],
+   'while the drone ignores that seat and stays in the bass octave, where a sustained tonic belongs');
 ok(Theory.cadence('nonsense', 0, 'major').length === 4, 'an unknown kind falls back to I-IV-V-I');
 
 console.log('\n== ear-theory: nextQuestion, seeded ==');
@@ -660,6 +673,27 @@ function spanFor(level, spread, seed) {
   }
   return hi - lo;
 }
+// nextQuestion hands back the SEAT it measured the degree from, because the
+// 'tonic' context sounds exactly that note as its reference. So midi - tonicMidi
+// must BE the degree — or the degree an octave up when spread 2 lifts the note —
+// and it can never be negative, or the "reference" would sit above the note it
+// is a reference for.
+var seatBad = [], r3 = rndFrom(4242);
+var s3 = { level: 7, questionIndex: 0, taper: 1, lastKey: null, lastDegrees: [],
+           voiceLo: 43, voiceHi: 67, spread: 2 };
+for (i = 0; i < 200; i++) {
+  s3.questionIndex = i;
+  q = Theory.nextQuestion(s3, r3);
+  if (q.tonicMidi % 12 !== q.tonicPc) seatBad.push('seat ' + q.tonicMidi + ' is not the tonic');
+  if (q.midi - q.tonicMidi !== q.degree && q.midi - q.tonicMidi !== q.degree + 12)
+    seatBad.push('gap ' + (q.midi - q.tonicMidi) + ' for degree ' + q.degree);
+  s3.lastKey = q.tonicPc;
+  s3.lastDegrees = [q.degree].concat(s3.lastDegrees).slice(0, 2);
+}
+ok(seatBad.length === 0, 'every draw returns the seat its degree was measured from: ' +
+   'midi - tonicMidi is the degree, or the degree an octave up' +
+   (seatBad.length ? ' — ' + seatBad.slice(0, 3).join('; ') : ''));
+
 var span1 = spanFor(1, 1, 21), span2 = spanFor(1, 2, 21);
 ok(span2 > span1 + 8, 'an explicit spread overrides the level default: L1 covers ' + span1 +
    ' semitones at spread 1 and ' + span2 + ' at spread 2');
@@ -926,6 +960,27 @@ var droneHeld = true;
 for (i = 1; i < dKeys.length; i++) if (dKeys[i] !== dKeys[0]) droneHeld = false;
 ok(droneHeld, 'the tonic never moves under a held drone (' + dKeys.join(',') + ')');
 
+// A single reference note is a CONTEXT, not a drone: it stops sounding, so it is
+// exactly the thing that fades and it must re-establish on the taper like a
+// cadence. Each trial also has to carry the seat its degree was measured from,
+// at or below the test note — that seat IS what this context plays.
+var refS = Session.create({ level: 3, context: 'tonic', taper: 2,
+                            length: { kind: 'questions', value: 8 }, clock: clock }, rndFrom(515));
+var rCtx = [], rBad = [];
+for (i = 0; i < 8; i++) {
+  trial = refS.next();
+  if (trial.playContext) rCtx.push(i + 1);
+  if (trial.context !== 'tonic') rBad.push('q' + (i + 1) + ' context ' + trial.context);
+  if (trial.tonicMidi % 12 !== trial.tonicPc) rBad.push('q' + (i + 1) + ' seat ' + trial.tonicMidi);
+  if (trial.midi < trial.tonicMidi) rBad.push('q' + (i + 1) + ' reference above the test note');
+  refS.ready(); CLOCK += 200; refS.answer(trial.degree); CLOCK += 60;
+}
+ok(rCtx.join(',') === '1,3,5,7',
+   'the tonic context tapers like a cadence, not like a drone (' + rCtx.join(',') + ')');
+ok(rBad.length === 0, 'and every trial carries the seat its degree was measured from' +
+   (rBad.length ? ' — ' + rBad.slice(0, 3).join('; ') : ''));
+ok(refS.finish().context === 'tonic', "and 'tonic' reaches the session record intact");
+
 // taper 1 is the other extreme: a fresh key every single question.
 var fast = Session.create({ level: 1, context: 'cadence', taper: 1,
                             length: { kind: 'questions', value: 10 }, clock: clock }, rndFrom(99));
@@ -1156,6 +1211,19 @@ sv = st0.store.saveSettings({ voiceLo: 53, voiceHi: 64 });
 ok(sv.voiceHi === 65, 'eleven semitones IS widened to the minimum twelve (' + sv.voiceHi + ')');
 sv = st0.store.saveSettings({ voiceLo: 40, voiceHi: 90 });
 ok(sv.voiceHi === 76, 'and fifty semitones is cut back to the maximum thirty-six (' + sv.voiceHi + ')');
+
+console.log('\n== ear-store: the tonic context round-trips ==');
+// A context this validator does not know is silently rewritten to 'cadence', so
+// an option added to the settings menu but not to ear-store.js's enum looks
+// exactly like a setting that refuses to stick — pick it, reload, and it is a
+// cadence again. That is the whole failure mode this pins.
+var stC = loadStore(null);
+ok(stC.store.saveSettings({ context: 'tonic' }).context === 'tonic',
+   "'tonic' survives saveSettings");
+ok(loadStore(stC.raw()).store.settings().context === 'tonic',
+   'and reads back as tonic after a reload, so it really reached storage');
+ok(loadStore(null).store.saveSettings({ context: 'wobble' }).context === 'cadence',
+   'while a context nobody ships still falls back to cadence');
 
 console.log('\n== ear-store: an existing user is NOT migrated onto the new default ==');
 // ear-store.js:189-192 makes this a promise in prose; this is the assertion that

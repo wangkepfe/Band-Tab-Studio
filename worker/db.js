@@ -1242,7 +1242,7 @@ const EAR_COLS =
  *  letting a CHECK constraint abort the insert. */
 function normEarMode(v) { return v === 'produce' ? 'produce' : 'identify'; }
 function normEarContext(v) {
-  return (v === 'ii-V-I' || v === 'drone') ? v : 'cadence';
+  return (v === 'ii-V-I' || v === 'drone' || v === 'tonic') ? v : 'cadence';
 }
 /** taper ∈ {1,2,4,8} questions, or 0 for "establish the key once per session".
  *  0 is the safe default: it is the only value that cannot overstate how often

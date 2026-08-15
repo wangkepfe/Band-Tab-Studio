@@ -93,8 +93,13 @@
 
 <!-- ============ VIEW TABS + TRANSPORT ============ -->
 <div class="viewbar">
-  <!-- ⚙ is the FIRST viewbar child so it never shifts when settings collapse/expand -->
-  <button class="icon sm" id="btnSettings" title="Show / hide the settings toolbar — more room for the tab" aria-pressed="false">⚙</button>
+  <!-- The fold toggle is the FIRST viewbar child, and the viewbar is the one strip that
+       SURVIVES a fold: the button that unfolds has to sit exactly where the button that
+       folded was, or you have to hunt for it. Labelled rather than icon-only because on
+       an iPad there is no hover, so a bare ⚙ never gets to explain itself. -->
+  <button class="btn sm fold-btn" id="btnSettings" aria-expanded="true"
+          title="Fold the header, tracks and settings away — full screen for the tab (F)">
+    <span class="fold-caret" id="btnSettingsCaret">▴</span>Panels</button>
   <div class="viewtabs" id="viewTabs">
     <button class="vtab on" data-view="pianoroll" title="Edit the MIDI in a piano-roll">🎹 Piano Roll</button>
     <button class="vtab" data-view="basstab" title="Render the MIDI as a bass tab">🎸 Bass Tab</button>
@@ -413,6 +418,7 @@
         <div class="guide-row"><span class="g-keys">BPM · time</span><span class="g-desc">The song's tempo and time-signature: they space the bar grid and the metronome. Notes are never re-timed, so the transcription keeps playing in step with the song.</span></div>
         <div class="guide-row"><span class="g-keys">grid offset · <kbd>✨ Auto</kbd></span><span class="g-desc">Slides the piano-roll bar grid in time (ticks) — pair it with BPM to line bar 1 up with music that starts off-grid. The notes stay put; only the grid moves. <b>Auto</b> sets both at once, borrowing the drum track's detected tempo and downbeat when the project has drums.</span></div>
         <div class="guide-row"><span class="g-keys">follow</span><span class="g-desc">Auto-scroll the piano roll to keep the playhead in view.</span></div>
+        <div class="guide-row"><span class="g-keys"><kbd>▴ Panels</kbd> · <kbd>F</kbd></span><span class="g-desc">Fold the header, track strip and both settings bars away so the tab fills the screen — the view tabs and the transport stay. Tap it again (or <kbd>F</kbd>) to bring them back; the choice is remembered.</span></div>
       </section>
 
       <section class="guide-sec">

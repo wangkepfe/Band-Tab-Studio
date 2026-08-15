@@ -140,11 +140,33 @@
   // Song button enabled, the clock at 0:00 and the transport spinning forever.
   // flash() and refreshSrcButtons() are hoisted declarations in this IIFE, so the
   // forward reference is safe.
-  YouTubePlayer.setOnFail(function (msg) {
+  YouTubePlayer.setOnFail(function (msg, code) {
     flash(msg);
-    if (YouTubePlayer.hasVideo()) return;
-    $('ytTitle').textContent = 'YouTube — unavailable';
-    $('ytPanel').style.display = 'none';
+    if (YouTubePlayer.hasVideo()) {
+      // The video is fine — the BROWSER refused a scripted play (the iPad's
+      // normal answer; see youtube.js). One tap inside the player fixes it for
+      // the session, so the panel has to be on screen to be tapped: a toast that
+      // fades in three seconds is no use if the user hid the video earlier. The
+      // title carries the instruction after the toast is gone.
+      if (code === 'autoplay-blocked' || code === 'not-started') {
+        $('ytTitle').textContent = 'Tap ▶ on the video to start';
+        $('ytPanel').style.display = '';
+      }
+      return;
+    }
+    // A NUMBER means the failure came from the player, so the iframe is on
+    // screen showing YouTube's OWN error page — its wording ("Video player
+    // configuration error", "Video unavailable") is as diagnostic as the code,
+    // and it carries YouTube's own way out to the watch page. Hiding the panel
+    // threw all of that away a beat before the toast faded, which is why the
+    // only report an iPad could produce was one sentence and no number. Our own
+    // string codes (bad-url · api-blocked · no-host · construct-failed ·
+    // timeout) leave no iframe worth looking at, so those still hide it.
+    var fromPlayer = code !== null && code !== undefined && !isNaN(parseInt(code, 10));
+    // The title is one ellipsised 12px line, so the number goes FIRST or it gets
+    // truncated off the end — it has to survive a screenshot.
+    $('ytTitle').textContent = fromPlayer ? ('YouTube error ' + code) : 'YouTube — unavailable';
+    $('ytPanel').style.display = fromPlayer ? '' : 'none';
     refreshSrcButtons();
   });
   Transport.init({
@@ -167,6 +189,11 @@
   function onTransport(st) {
     $('btnPlay').textContent = st.playing ? '⏸' : '▶';
     $('timeNow').textContent = fmt(st.posSec); $('timeTotal').textContent = fmt(st.durationSec);
+    // The video is rolling, so the "tap ▶ on the video" instruction above has
+    // done its job — put the plain title back. (This rides the transport's own
+    // update channel rather than YouTubePlayer.setOnState(), which is a single
+    // slot that Transport.init() owns.)
+    if (st.playing && YouTubePlayer.isPlaying() && $('ytTitle').textContent !== 'YouTube') $('ytTitle').textContent = 'YouTube';
   }
 
   /* ---- backend client (desktop only — the web build has no backend) ---- */
@@ -199,10 +226,16 @@
     show($('toolsPianoRoll'), name === 'pianoroll'); show($('toolsBassTab'), name === 'basstab'); show($('toolsGuitarTab'), name === 'guitartab'); show($('toolsGuitarChords'), name === 'guitarchords'); show($('toolsDrumTab'), name === 'drumtab');
     show($('tabZoom'), name === 'basstab' || name === 'guitartab'); updateTabZoomPct();
     Transport.setView(name);
-    if (name === 'pianoroll') roll.redraw();
-    else if (TAB_VIEWS[name]) TAB_VIEWS[name].render();
-    else if (name === 'drumtab') drumRoll.render();
+    redrawActiveView();
     refreshSrcButtons();
+  }
+  // Re-render whichever view is on screen. drumRoll.resize() rather than .render():
+  // the drum canvas only re-measures its parent in resize(), and the panel fold changes
+  // the pane's height under it. resize() renders, so this stays one call.
+  function redrawActiveView() {
+    if (currentView === 'pianoroll') roll.redraw();
+    else if (TAB_VIEWS[currentView]) TAB_VIEWS[currentView].render();
+    else if (currentView === 'drumtab') drumRoll.resize();
   }
   $('viewTabs').addEventListener('click', function (e) { var b = e.target.closest('.vtab'); if (b && !b.classList.contains('disabled')) setView(b.dataset.view); });
 
@@ -213,15 +246,29 @@
   $('tabZoomOut').onclick = function () { tabZoomBy(1 / 1.15); };
   $('tabZoomIn').onclick = function () { tabZoomBy(1.15); };
   $('tabZoomReset').onclick = function () { tabZoomBy(0); };
-  // collapse the per-view settings toolbar to give the workspace/tab more room (remembered)
-  $('btnSettings').onclick = function () {
-    var collapsed = document.body.classList.toggle('settings-collapsed');
-    this.classList.toggle('on', collapsed); this.setAttribute('aria-pressed', collapsed);
-    try { localStorage.setItem('studioSettingsCollapsed', collapsed ? '1' : ''); } catch (e) {}
-  };
+  // Fold every settings surface away — header, source bar, track strip and the per-view
+  // toolbar — so the workspace gets the whole screen (studio.css does the hiding). The
+  // choice is remembered across sessions, which is why the boot call below runs it too
+  // rather than just setting the class: caret, title and aria have to agree with it.
+  // A fold resizes the canvases without a window resize event. Each canvas does watch
+  // itself with a ResizeObserver, but redrawing here as well makes it explicit rather
+  // than a side effect of a callback that only fires while the tab is compositing —
+  // and it costs one frame. Safe at boot: every view is constructed above (l.62-122).
+  function panelsFolded() { return document.body.classList.contains('settings-collapsed'); }
+  function setPanelsFolded(folded) {
+    document.body.classList.toggle('settings-collapsed', folded);
+    var b = $('btnSettings');
+    b.setAttribute('aria-expanded', folded ? 'false' : 'true');
+    b.title = folded ? 'Bring the header, tracks and settings back (F)'
+                     : 'Fold the header, tracks and settings away — full screen for the tab (F)';
+    $('btnSettingsCaret').textContent = folded ? '▾' : '▴';
+    redrawActiveView();
+    try { localStorage.setItem('studioSettingsCollapsed', folded ? '1' : ''); } catch (e) {}
+  }
+  $('btnSettings').onclick = function () { setPanelsFolded(!panelsFolded()); };
   (function () {
     var on = false; try { on = !!localStorage.getItem('studioSettingsCollapsed'); } catch (e) {}
-    if (on) { document.body.classList.add('settings-collapsed'); var b = $('btnSettings'); b.classList.add('on'); b.setAttribute('aria-pressed', 'true'); }
+    setPanelsFolded(on);
   })();
 
   /* ====================== tracks ====================== */
@@ -908,6 +955,15 @@
     var tag = (document.activeElement && document.activeElement.tagName) || '';
     if (/INPUT|SELECT|TEXTAREA/.test(tag) || isModalOpen()) return;
     e.preventDefault(); showHelp(true);
+  });
+  // global "F" folds / unfolds the settings panels. Bare F only: Ctrl/⌘+F is the
+  // browser's find and Alt+F opens a menu, and neither view binds F of its own.
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'f' && e.key !== 'F') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var tag = (document.activeElement && document.activeElement.tagName) || '';
+    if (/INPUT|SELECT|TEXTAREA/.test(tag) || isModalOpen()) return;
+    e.preventDefault(); setPanelsFolded(!panelsFolded());
   });
 
   /* ====================== piano-roll toolbar ====================== */

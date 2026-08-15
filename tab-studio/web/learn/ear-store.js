@@ -215,7 +215,7 @@ var EarStore = (function () {
     s.level        = intIn(s.level, 1, MAX_LEVEL, DEFAULTS.level);
     s.autoAdvance  = !!s.autoAdvance;
     s.mode         = oneOf(s.mode, ['identify', 'produce'], DEFAULTS.mode);
-    s.context      = oneOf(s.context, ['cadence', 'ii-V-I', 'drone'], DEFAULTS.context);
+    s.context      = oneOf(s.context, ['tonic', 'cadence', 'ii-V-I', 'drone'], DEFAULTS.context);
     s.taper        = oneOf(intIn(s.taper, 0, 8, DEFAULTS.taper), [0, 1, 2, 4, 8], DEFAULTS.taper);
     s.singGate     = bool01(s.singGate);
     s.spread       = intIn(s.spread, 1, 2, DEFAULTS.spread);
@@ -286,7 +286,7 @@ var EarStore = (function () {
       durationSec: intIn(pick(r, 'durationSec', 'duration_sec'), 0, MAX_DURATION_SEC, 0),
       level:       intIn(r.level, 1, MAX_LEVEL, 1),
       mode:        oneOf(r.mode, ['identify', 'produce'], 'identify'),
-      context:     oneOf(r.context, ['cadence', 'ii-V-I', 'drone'], 'cadence'),
+      context:     oneOf(r.context, ['tonic', 'cadence', 'ii-V-I', 'drone'], 'cadence'),
       taper:       oneOf(intIn(taper, 0, 8, 0), [0, 1, 2, 4, 8], 0),
       singGate:    bool01(pick(r, 'singGate', 'sing_gate')),
       questions:   questions,

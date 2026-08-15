@@ -109,7 +109,11 @@ function matchRoute(method, segs) {
  * (our JSON, Better Auth's cookies and redirects, the asset fallback) is
  * hardened here instead. The choices, and why:
  *   nosniff                  a JSON error must never be sniffed as HTML
- *   Referrer-Policy          no API URL leaks to github.com on the OAuth hop
+ *   Referrer-Policy          origin only, never a path: no API URL leaks to
+ *                            github.com on the OAuth hop, and a cross-origin
+ *                            embed (the YouTube "Song" source) can still name
+ *                            its embedder. Full no-referrer broke that — see
+ *                            the note in build.js's _headers block.
  *   X-Frame-Options / CSP    nothing under /api/* is ever a framed document
  *   CORP: same-origin        blocks cross-origin no-cors embedding of replies
  *   Vary: Cookie             EVERY card carries canEdit/isMine, so every
@@ -124,7 +128,7 @@ const OWN_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
 
 function applySecurity(h) {
   h.set('X-Content-Type-Options', 'nosniff');
-  h.set('Referrer-Policy', 'no-referrer');
+  h.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   h.set('X-Frame-Options', 'DENY');
   h.set('Cross-Origin-Resource-Policy', 'same-origin');
   if (!h.has('Cache-Control')) h.set('Cache-Control', 'no-store');

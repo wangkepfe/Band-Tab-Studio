@@ -102,7 +102,11 @@ const MAX_LEARN_LIMIT = 100;     // db.js MAX_EAR_LIMIT; see its response-size n
  * truthy and a client could smuggle a non-value past an `if (map[v])` test.
  * Three-element indexOf is also faster than the property lookup it replaces. */
 const LEARN_MODES = ['identify', 'produce'];
-const LEARN_CONTEXTS = ['cadence', 'ii-V-I', 'drone'];
+// 'tonic' — a single reference note instead of a progression — is admitted by
+// migrations/0005_ear_context_tonic.sql. Deploying this line ahead of that
+// migration turns a would-be 400 into a 500 at the CHECK constraint; apply the
+// migration first (its header says the same thing from the other side).
+const LEARN_CONTEXTS = ['tonic', 'cadence', 'ii-V-I', 'drone'];
 const LEARN_TAPERS = [0, 1, 2, 4, 8];      // questions between key re-statements
 
 const MAX_LEARN_DURATION = 86400;   // 24 h; 'endless' mode in a forgotten tab
