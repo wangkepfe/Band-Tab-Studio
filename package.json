@@ -22,6 +22,10 @@
     "youtube"
   ],
   "homepage": "https://github.com/wangkepfe/Band-Tab-Studio",
+  "_workspaces": "worker/ declares better-auth + drizzle-orm in its OWN package.json (see the notes in there for why it is a separate manifest). Listing it as a workspace is what makes the root `npm clean-install` install those deps — and that is not a convenience, it is the deploy. Cloudflare Pages/Workers CI runs exactly one install, at the repo root, then `npx wrangler deploy`; esbuild resolves worker/*.js imports by walking UP to the root node_modules. Drop this key and the build goes green locally (worker/node_modules exists on a dev box) and dies in CI with `Could not resolve \"better-auth\"`. There is deliberately no worker/package-lock.json: npm ignores nested lockfiles inside a workspace, so a second one would only rot.",
+  "workspaces": [
+    "worker"
+  ],
   "devDependencies": {
     "wrangler": "^4.122.0"
   }
