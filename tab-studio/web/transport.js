@@ -62,7 +62,24 @@ var Transport = (function () {
   }
 
   function isMelodic() { return view !== 'drumtab'; }
-  function project() { return (cfg.getProject && cfg.getProject()) || { ppq: 480, tempo: 120 }; }
+  // project() is NOT a cheap getter: the piano roll builds a fresh object and maps
+  // its whole note array on every call. One frame reaches it nine times over
+  // (posSeconds, pushPlayhead, three metronome readers — metroTsNum twice in a
+  // single expression — emit's own posSeconds+durSeconds, and durSeconds), all to
+  // read a ppq and a tempo, so a 295-note track churned ~2,700 throwaway objects
+  // per frame. That is invisible on a desktop and it is GC pressure an older iPad
+  // pays for in dropped frames.
+  //
+  // So: memoise, but only for the span of one frame() — nothing can edit the
+  // project mid-frame, and outside a frame the old call-through behaviour is kept
+  // exactly, so a seek or a tempo change still sees the change immediately.
+  var projCache = null, inFrame = false;
+  function project() {
+    if (inFrame && projCache) return projCache;
+    var p = (cfg.getProject && cfg.getProject()) || { ppq: 480, tempo: 120 };
+    if (inFrame) projCache = p;
+    return p;
+  }
   // Ticks per second — off the TIMELINE tempo (the tempo the notes were written at),
   // never the musical BPM: ticks are positions on the recording, so the playhead has
   // to walk them at the rate the transcription was made, whatever grid is drawn over it.
@@ -153,14 +170,17 @@ var Transport = (function () {
   // line of text back up (app.js wires flash()). Optional — silent if unwired.
   function notify(msg) { if (cfg && typeof cfg.onNotice === 'function') cfg.onNotice(msg); }
   function frame() {
-    var sec = posSeconds();
-    pushPlayhead(sec);
-    if (metroOn) Metronome.sync(sec, metroTempo(), metroTsNum(), metroOrigin());
-    emit();
-    var dur = durSeconds();
-    var done = !enginePlaying() || (dur > 0 && sec >= dur - 0.02);
-    if (done) { finalize(); return; }
-    raf = requestAnimationFrame(frame);
+    inFrame = true; projCache = null;         // one project() read for the whole frame
+    try {
+      var sec = posSeconds();
+      pushPlayhead(sec);
+      if (metroOn) Metronome.sync(sec, metroTempo(), metroTsNum(), metroOrigin());
+      emit();
+      var dur = durSeconds();
+      var done = !enginePlaying() || (dur > 0 && sec >= dur - 0.02);
+      if (done) { finalize(); return; }
+      raf = requestAnimationFrame(frame);
+    } finally { inFrame = false; projCache = null; }
   }
   function stopRaf() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
   function finalize() { running = false; stopRaf(); enginePause(); Metronome.stop(); emit(); }

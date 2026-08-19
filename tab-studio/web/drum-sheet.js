@@ -47,6 +47,7 @@ var DrumSheet = (function () {
   var _host = null;     // container of the last render (scroll box for the playhead)
   var _layout = null;   // time → (system, x) mapping captured at render time
   var _lastT = -1;      // last playhead time in seconds (re-applied after re-renders)
+  var _lastPhSys = -1;  // system the playhead was last on — its height only changes here
 
   function rowY(row) { return TOP + row * GAP; }
 
@@ -236,6 +237,7 @@ var DrumSheet = (function () {
       stepSec: stepSec, offset: offset, colW: colW, leftPad: leftPad,
       barCols: barCols, barsPerLine: barsPerLine, endCol: endCol, systems: systems
     };
+    _lastPhSys = -1;          // fresh systems (and a fresh <div>) — re-apply the height
     applyPlayhead(false);
   }
 
@@ -276,9 +278,21 @@ var DrumSheet = (function () {
 
     if (!ph) { ph = document.createElement('div'); ph.className = 'ds-playhead'; _host.appendChild(ph); }
     ph.style.display = 'block';
-    ph.style.left   = (sysLeft + x) + 'px';
-    ph.style.top    = sysTop + 'px';
-    ph.style.height = sysH + 'px';
+    // Move it with a transform, not left/top. Those are layout properties, so the
+    // old version dirtied layout and then immediately read clientHeight and
+    // scrollHeight below — a forced synchronous layout of the whole staff on every
+    // frame of playback. A transform on a promoted layer dirties nothing, so the
+    // reads that follow are free. Height is the one layout write left, and it only
+    // changes when the playhead moves to a different system.
+    //
+    // `sysH &&` guards the latch against a FAILED measurement: the block above
+    // falls back to a live getBoundingClientRect when the staff was rendered while
+    // hidden, and if it is still hidden that reads 0 too. Latching a 0 would pin
+    // the playhead at zero height until it crossed into another system, because
+    // only a fresh render() clears _lastPhSys. Not latching a zero keeps the old
+    // code's self-healing on the first visible frame.
+    if (sysH && si !== _lastPhSys) { ph.style.height = sysH + 'px'; _lastPhSys = si; }
+    ph.style.transform = 'translate3d(' + (sysLeft + x) + 'px,' + sysTop + 'px,0)';
 
     if (playing) {
       // Follow the playhead with a ~40% lead, but always keep the whole current

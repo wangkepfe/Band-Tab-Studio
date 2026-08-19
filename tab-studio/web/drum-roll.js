@@ -75,6 +75,28 @@ var DrumRoll = (function () {
     var dpr = window.devicePixelRatio || 1;
     var W = 0, H = 0;
 
+    // ---- playhead overlay ----------------------------------------------------
+    // Same trick as the piano roll: a transparent canvas stacked over the grid,
+    // carrying only the play cursor. render() here is eight passes over every lane,
+    // every beat line and all ~1,800 hits (drawn twice — grid and velocity lane),
+    // and setPlayhead used to call it every frame purely to shift a dashed line.
+    // At the default zoomFit the grid cannot even scroll (maxScrollX() is 0), so
+    // that repaint was redrawing a pixel-identical image sixty times a second.
+    //
+    // Drawing on top is faithful to the old z-order: the cursor was painted after
+    // the lanes, hits, header and labels and before the scrollbar, and it is bounded
+    // to x >= LABEL_W and y < sbTop(), so it never covered the labels or the
+    // scrollbar then either.
+    var over = document.createElement('canvas');
+    over.style.cssText = 'position:absolute;top:0;left:0;display:block;pointer-events:none';
+    var octx = over.getContext('2d');
+    var phLastX = -1;
+    // Start collapsed. A fresh <canvas> defaults to a 300x150 box, and until the
+    // first sync (which cannot happen while the pane is hidden and measures 0)
+    // that phantom box would sit over the top-left corner of the view.
+    over.width = over.height = 0;
+
+
     // ---- state ---------------------------------------------------------------
     var st = {
       data:     null,   // { events, tempo, duration } from backend
@@ -245,8 +267,27 @@ var DrumRoll = (function () {
       drawVelLane();
       drawHeader();
       drawLabels();
-      if (st.playhead >= 0) drawPlayhead();
       drawScrollbar();
+      drawPlayheadLayer();     // cursor lives on the overlay; keep it after a repaint
+    }
+
+    // Repaint ONLY the play cursor, clearing just the band the last one occupied
+    // (a full retina-canvas clear is megabytes of writes per frame).
+    function drawPlayheadLayer() {
+      if (W <= 0 || H <= 0) return;
+      var bot = sbTop();
+      if (phLastX >= 0) octx.clearRect(phLastX - 7, 0, 14, bot);
+      phLastX = -1;
+      if (st.playhead < 0) return;
+      var x = timeToX(st.playhead);
+      if (x < LABEL_W || x > W) return;
+      octx.strokeStyle = C.play; octx.lineWidth = 1.5;
+      octx.setLineDash([3, 3]);
+      octx.beginPath(); octx.moveTo(x, 0); octx.lineTo(x, bot); octx.stroke();
+      octx.setLineDash([]);
+      octx.fillStyle = C.play;
+      octx.beginPath(); octx.moveTo(x - 5, 0); octx.lineTo(x + 5, 0); octx.lineTo(x, 9); octx.closePath(); octx.fill();
+      phLastX = x;
     }
 
     function drawLaneBg() {
@@ -268,29 +309,46 @@ var DrumRoll = (function () {
       var t1  = xToTime(W) + spb;
       var top = HEADER_H, bot = velTop();
 
+      // All of these are vertical lines that differ only by stroke style, so they
+      // go down as ONE path per style instead of a beginPath/stroke per line. Same
+      // pixels; a screenful of beats was ~230 separate path submissions per frame,
+      // and this is the pass that still has to run whenever the grid scrolls under
+      // the playhead. Three strokes now, whatever the zoom.
+      function strokeAll(xs, style, width) {
+        if (!xs.length) return;
+        cx.strokeStyle = style; cx.lineWidth = width;
+        cx.beginPath();
+        for (var i = 0; i < xs.length; i++) { cx.moveTo(xs[i], top); cx.lineTo(xs[i], bot); }
+        cx.stroke();
+      }
+
       // subdivision grid lines (faint) — indexed from the (shifted) grid origin
       if (st.gridSub > 4 && st.zoom > 40) {
         var spg = spb / (st.gridSub / 4);
         var gS = Math.floor((t0 - o) / spg), gE = Math.ceil((t1 - o) / spg);
-        cx.strokeStyle = 'rgba(43,50,64,0.6)'; cx.lineWidth = 0.5;
+        var subs = [];
         for (var g = gS; g <= gE; g++) {
           var gx = timeToX(o + g * spg);
           if (gx < LABEL_W || gx > W) continue;
           if (((g % (st.gridSub / 4)) + (st.gridSub / 4)) % (st.gridSub / 4) === 0) continue; // beat lines drawn below
-          cx.beginPath(); cx.moveTo(gx, top); cx.lineTo(gx, bot); cx.stroke();
+          subs.push(gx);
         }
+        strokeAll(subs, 'rgba(43,50,64,0.6)', 0.5);
       }
 
       // beat / bar lines
       var bS = Math.floor((t0 - o) / spb), bE = Math.ceil((t1 - o) / spb);
+      var bars = [], beats = [];
       for (var b = bS; b <= bE; b++) {
         var bx = timeToX(o + b * spb);
         if (bx < LABEL_W - 1 || bx > W + 1) continue;
-        var isBar = ((b % 4) + 4) % 4 === 0;
-        cx.strokeStyle = isBar ? C.line : C.line2;
-        cx.lineWidth   = isBar ? 1.0    : 0.5;
-        cx.beginPath(); cx.moveTo(bx, top); cx.lineTo(bx, bot); cx.stroke();
+        (((b % 4) + 4) % 4 === 0 ? bars : beats).push(bx);
       }
+      // Every 4th beat IS the bar line, so the two sets are disjoint by construction
+      // and never share an x — splitting the one interleaved loop into two passes
+      // cannot change which line wins anywhere.
+      strokeAll(beats, C.line2, 0.5);
+      strokeAll(bars, C.line, 1.0);
     }
 
     function drawHits() {
@@ -425,17 +483,6 @@ var DrumRoll = (function () {
         cx.font = '9.5px sans-serif';    cx.fillStyle = C.dim;
         cx.fillText(lane.name, LABEL_W - 10, midY + 7);
       }
-    }
-
-    function drawPlayhead() {
-      var x = timeToX(st.playhead);
-      if (x < LABEL_W || x > W) return;
-      cx.strokeStyle = C.play; cx.lineWidth = 1.5;
-      cx.setLineDash([3, 3]);
-      cx.beginPath(); cx.moveTo(x, 0); cx.lineTo(x, sbTop()); cx.stroke();
-      cx.setLineDash([]);
-      cx.fillStyle = C.play;
-      cx.beginPath(); cx.moveTo(x - 5, 0); cx.lineTo(x + 5, 0); cx.lineTo(x, 9); cx.closePath(); cx.fill();
     }
 
     function drawScrollbar() {
@@ -700,6 +747,15 @@ var DrumRoll = (function () {
       canvas.style.width  = W + 'px';
       canvas.style.height = H + 'px';
       cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // the overlay tracks the base canvas exactly; assigning width/height also
+      // wipes it, so the remembered dirty band is void
+      if (!over.parentNode && canvas.parentNode) canvas.parentNode.insertBefore(over, canvas.nextSibling);
+      over.width  = canvas.width;
+      over.height = canvas.height;
+      over.style.width  = W + 'px';
+      over.style.height = H + 'px';
+      octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      phLastX = -1;
       render();
     }
 
@@ -743,10 +799,16 @@ var DrumRoll = (function () {
         // While playing, auto-follow so the playhead rides ~30% from the left of
         // the grid. When paused/seeking, leave the view put so a click on the
         // timeline lands the cursor exactly where it was clicked.
+        var sx = st.scrollX;
         if (t >= 0 && isPlaying && isPlaying()) {
           st.scrollX = clamp(t * st.zoom - (W - LABEL_W) * 0.30, 0, maxScrollX());
         }
-        render();
+        // Repaint the grid only if it genuinely moved. Whenever the whole song
+        // fits (the default after zoomFit, where maxScrollX() is 0) it never does,
+        // so playback costs one thin overlay redraw per frame instead of eight
+        // full passes over every lane, beat line and hit.
+        if (st.scrollX !== sx) render();
+        else drawPlayheadLayer();
       },
 
       setTool:    function (t) { applyTool(t); },

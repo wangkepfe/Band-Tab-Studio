@@ -24,8 +24,6 @@
 var BassTabView = (function () {
   'use strict';
 
-  var SVGNS = 'http://www.w3.org/2000/svg';
-
   // difficulty palette (matches the Bass Tab Creator's DIFF map)
   var DIFF = {
     easy: { fill: '#16331f', stroke: '#3fb950', text: '#9ff0ad' },
@@ -59,15 +57,23 @@ var BassTabView = (function () {
 
   // grid select value (note fraction) -> ticks, resolved against the project ppq.
   // 1/4=ppq, 1/8=ppq/2, 1/8T=ppq/3, 1/16=ppq/4, 1/16T=ppq/6, 1/32=ppq/8.
+  //
+  // Deliberately NOT rounded. The sole caller divides ticksPerBar by this and
+  // rounds THAT, so it never needs a whole number of ticks — and rounding here
+  // quietly broke the division: at ppq 220 a 1/32 is 27.5 ticks, rounding it to 28
+  // makes 880/28 come out as 31 steps per bar instead of 32. A bar that no longer
+  // splits into whole rest values is one where decomposeRest can find nothing to
+  // use, so the whole rhythm lane degrades to single-column rests (~1400 glyphs
+  // instead of ~380 on a ppq-220 project). 880/27.5 is exactly 32.
   function gridDivToTicks(div, ppq) {
     switch (String(div)) {
       case '4':   return ppq;
-      case '8':   return Math.round(ppq / 2);
-      case '8t':  return Math.round(ppq / 3);
-      case '16':  return Math.round(ppq / 4);
-      case '16t': return Math.round(ppq / 6);
-      case '32':  return Math.round(ppq / 8);
-      default:    return Math.round(ppq / 4);   // fall back to 1/16
+      case '8':   return ppq / 2;
+      case '8t':  return ppq / 3;
+      case '16':  return ppq / 4;
+      case '16t': return ppq / 6;
+      case '32':  return ppq / 8;
+      default:    return ppq / 4;   // fall back to 1/16
     }
   }
 
@@ -88,17 +94,38 @@ var BassTabView = (function () {
   // Relevant rules ported from index.html's <style>. Uses studio.css tokens
   // (--string, --play) where they exist; difficulty colours live inline per-rect.
   var STYLE_ID = 'bass-tab-view-style';
+  // Vertical gap between stacked systems. The playhead's y is derived from this
+  // rather than measured, so the constant and the CSS must stay one value —
+  // hence the interpolation below instead of a literal in the rule.
+  var SYS_GAP = 6;
   function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;
     var css =
       '.bt-view{overflow-x:auto;overflow-y:auto;background:#0b0f15;border:1px solid var(--line);' +
         'border-radius:10px;padding:10px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}' +
-      '.bt-view svg.system{display:block;margin-bottom:6px;touch-action:pan-x pan-y}' +
+      '.bt-view svg.system{display:block;margin-bottom:' + SYS_GAP + 'px;touch-action:pan-x pan-y}' +
       '.bt-view.seekable svg.system{cursor:crosshair}' +
       '.bt-view g.note{cursor:pointer}' +
       '.bt-view g.note:hover path{filter:brightness(1.4)}' +
       '.bt-view g.note:active path{filter:brightness(1.7)}' +
-      '.bt-view line.playhead{stroke:var(--play,#ffcf4d);stroke-width:1.8;pointer-events:none}' +
+      // The playhead is a plain absolutely-positioned div, NOT an SVG child, and it
+      // is moved with a 3D transform. Both halves of that matter on older iPads:
+      //   • as an <svg> child, changing its x1/x2 dirtied the whole system <svg>,
+      //     so every frame WebKit re-laid-out and re-rasterised a 1286px-wide,
+      //     CSS-scaled vector document of thousands of elements — at DPR 2. That is
+      //     the ~1s-per-frame stutter.
+      //   • translate3d + will-change puts it on its own compositor layer, so a move
+      //     is a layer offset on the compositor thread: no layout, no repaint of the
+      //     staff underneath it, nothing for the main thread to do.
+      // It scrolls with the staff because the container is itself the positioned
+      // containing block (ensured in create()), so the offsets below are
+      // content-box coordinates. Deliberately NOT a `.bt-view{position:relative}`
+      // rule: the host pane already carries `.tabhost{position:absolute;inset:0}`
+      // at equal specificity, and this stylesheet is injected after studio.css —
+      // so such a rule would win the cascade and collapse the pane.
+      '.bt-view .bt-playhead{position:absolute;top:0;left:0;width:2px;height:0;' +
+        'background:var(--play,#ffcf4d);border-radius:1px;pointer-events:none;z-index:2;' +
+        'will-change:transform;transform:translate3d(-9999px,0,0)}' +
       '.bt-empty{color:var(--muted,#8b97a7);text-align:center;padding:48px 20px;font-size:13px}';
     var el = document.createElement('style');
     el.id = STYLE_ID;
@@ -110,6 +137,12 @@ var BassTabView = (function () {
     opts = opts || {};
     injectStyle();
     if (container && container.classList) container.classList.add('bt-view');
+    // The playhead is absolutely positioned against this container, so it has to
+    // be a containing block. The app's own pane already is (position:absolute);
+    // this only steps in for a plain host, and inline so it never fights a
+    // stylesheet that positions the container some other way.
+    if (container && window.getComputedStyle &&
+        getComputedStyle(container).position === 'static') container.style.position = 'relative';
 
     var getProject   = opts.getProject   || function () { return null; };
     var onSeekSeconds = opts.onSeekSeconds || function () {};
@@ -141,18 +174,22 @@ var BassTabView = (function () {
     var lastResult = null;
     var lastSong = null;
     var lastSettings = null;
-    var geom = { systems: [], grid: 1, spb: 1, ppq: 480, tempo: 120 };
+    var geom = { systems: [], grid: 1, spb: 1, ppq: 480, tempo: 120, padTop: 0, padLeft: 0 };
     var zoomFactor = 1;   // render scale: each system <svg> is sized W*zoom × H*zoom (vector-crisp)
     var follow = opts.follow || function () { return true; };  // () => auto-scroll? (only while playing)
     var lastFollowIdx = -1;   // page-flip only when the playhead enters a NEW row (no per-frame reflow)
 
-    // playhead overlay (a single <line> moved between system <svg>s)
-    var ph = null, phSvg = null;
+    // playhead overlay (one absolutely-positioned div over the whole staff).
+    // lastTick is kept because the div's position is in PIXELS: unlike the old
+    // in-viewBox <line>, it does not rescale itself when the systems are zoomed,
+    // so a zoom has to recompute it — and while paused nothing else ever will.
+    var ph = null, lastPhSys = -1, lastTick = null;
 
     // ---- rendering ---------------------------------------------------------
     function render() {
       var project = getProject();
       lastSong = null; lastSettings = null; lastResult = null;
+      lastTick = null;   // a fresh staff: no tick to re-place on the next zoom
       detachPlayhead();
 
       var rawNotes = (project && project.notes) || [];
@@ -427,11 +464,36 @@ var BassTabView = (function () {
       var els = container.querySelectorAll('svg.system');
       geom.systems = Array.prototype.map.call(els, function (el) {
         return {
-          el: el,
+          el: el, top: 0,
           startCol: +el.dataset.startcol, endCol: +el.dataset.endcol,
           colW: +el.dataset.colw, leftPad: +el.dataset.leftpad,
           W: +el.dataset.w, H: +el.dataset.h, firstBar: +el.dataset.firstbar
         };
+      });
+      layOutSystems();
+    }
+    // Each system's y within the scrolled content, derived rather than measured.
+    // A getBoundingClientRect() per system would be a forced layout on every
+    // render AND would read back zeros whenever the view is rendered while its
+    // pane is display:none (which is exactly what view-switching does). The
+    // stacking rule is ours — block SVGs, one under the next, SYS_GAP between —
+    // so arithmetic is both cheaper and more reliable than measuring it.
+    //
+    // The one thing we can't derive is the container's padding: the systems flow
+    // from its CONTENT box while an absolutely-positioned child anchors to its
+    // PADDING box, so the playhead needs that gap added back. Read once here (on
+    // render and on zoom), never in the playback loop. Read rather than hard-coded
+    // because whichever stylesheet wins decides it — today .bt-view's 10px beats
+    // .tabhost's 14/16 (equal specificity, injected later), but this module is
+    // meant to drop into any host, and the border cancels out either way.
+    function layOutSystems() {
+      var pad = window.getComputedStyle ? getComputedStyle(container) : null;
+      geom.padTop  = pad ? (parseFloat(pad.paddingTop) || 0) : 0;
+      geom.padLeft = pad ? (parseFloat(pad.paddingLeft) || 0) : 0;
+      var y = 0;
+      geom.systems.forEach(function (m) {
+        m.top = y;
+        y += m.H * zoomFactor + SYS_GAP;
       });
     }
 
@@ -441,8 +503,22 @@ var BassTabView = (function () {
         m.el.style.width = (m.W * zoomFactor) + 'px';
         m.el.style.height = (m.H * zoomFactor) + 'px';
       });
+      layOutSystems();     // the rows just changed height — the playhead's y map with them
+      lastPhSys = -1;      // force the next setPlayheadTick to resize + reposition
+      lastFollowIdx = -1;  // and to re-scroll: the current row is a different height now
     }
-    function setZoom(z) { zoomFactor = Math.max(0.4, Math.min(3, +z || 1)); applyZoom(); onZoom(zoomFactor); }
+    // Re-place the playhead after a zoom. applyZoom() alone is not enough: while
+    // paused nothing calls setPlayheadTick again (the transport only pushes from
+    // its rAF loop and on seeks), so the div would keep the pixel offsets of the
+    // old zoom and drift — far enough at a big jump to sit on the wrong row.
+    // Done here rather than in applyZoom() because render() calls applyZoom() too,
+    // and there the playhead has deliberately just been detached.
+    function setZoom(z) {
+      zoomFactor = Math.max(0.4, Math.min(3, +z || 1));
+      applyZoom();
+      if (lastTick != null && lastTick >= 0) setPlayheadTick(lastTick);
+      onZoom(zoomFactor);
+    }
     function getZoom() { return zoomFactor; }
     // ctrl/cmd + wheel zooms the tab; a plain wheel scrolls the staff as usual
     function onWheel(e) {
@@ -452,33 +528,54 @@ var BassTabView = (function () {
     }
     // page-flip follow: if the playhead's row isn't fully visible, jump the scroll
     // window so the row sits near the top of the next "page" (browser clamps at the end).
-    function keepRowVisible(el) {
-      if (!container || !el) return;
-      var hostRect = container.getBoundingClientRect(), r = el.getBoundingClientRect();
-      var topIn = r.top - hostRect.top;
-      if (topIn < 0 || r.bottom - hostRect.top > container.clientHeight) container.scrollTop += topIn - 8;
+    // Works off the derived row geometry, so it costs no forced layout — the old
+    // getBoundingClientRect() pair ran inside the playback loop and flushed layout
+    // for the whole staff every time the playhead crossed a row.
+    function keepRowVisible(m) {
+      if (!container || !m) return;
+      var top = geom.padTop + m.top;            // same frame scrollTop is measured in
+      var h = m.H * zoomFactor, topIn = top - container.scrollTop;
+      if (topIn < 0 || topIn + h > container.clientHeight) container.scrollTop = Math.max(0, top - 8);
     }
 
     // ---- playhead ----------------------------------------------------------
     function detachPlayhead() {
-      if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
-      phSvg = null; lastFollowIdx = -1;
+      // Keep the element, just park it off-screen: creating and destroying it per
+      // seek would churn a compositor layer for no reason.
+      if (ph) ph.style.transform = 'translate3d(-9999px,0,0)';
+      lastPhSys = -1; lastFollowIdx = -1;
     }
     // Position the playhead overlay at a project tick (tick<0 hides it). Maps the
     // tick -> system + x via the cached geometry. Does NOT re-render.
+    //
+    // The hot path is deliberately three writes or fewer: one transform always,
+    // plus a height and a lazy append only when the row changes. Everything the
+    // position depends on (row tops, column width, zoom) is cached, so the common
+    // frame reads nothing back from the DOM and triggers no layout. (Crossing into
+    // a new row does read scrollTop/clientHeight in keepRowVisible — once every
+    // few seconds, not every frame.)
     function setPlayheadTick(tick) {
       var sys = geom.systems, grid = geom.grid || 1;
+      lastTick = tick;                    // so a zoom can re-place it without the transport
       if (tick == null || tick < 0 || !sys.length) { detachPlayhead(); return; }
       var col = (tick + (geom.tickShift || 0)) / grid, idx = -1;
       for (var i = 0; i < sys.length; i++) { if (col >= sys[i].startCol && col < sys[i].endCol) { idx = i; break; } }
       if (idx < 0) idx = (col < sys[0].startCol) ? 0 : sys.length - 1;
-      var m = sys[idx], c = clamp(col, m.startCol, m.endCol), x = m.leftPad + (c - m.startCol) * m.colW;
-      if (!ph) { ph = document.createElementNS(SVGNS, 'line'); ph.setAttribute('class', 'playhead'); }
-      if (phSvg !== m.el) { m.el.appendChild(ph); phSvg = m.el; }
-      ph.setAttribute('x1', x.toFixed(1)); ph.setAttribute('x2', x.toFixed(1));
-      ph.setAttribute('y1', '8'); ph.setAttribute('y2', (m.H - 6).toFixed(1));
+      var m = sys[idx], c = clamp(col, m.startCol, m.endCol);
+      // x is in the system's own (unscaled) viewBox units, so it scales with zoom
+      // exactly like the staff the SVG draws.
+      var x = geom.padLeft + (m.leftPad + (c - m.startCol) * m.colW) * zoomFactor;
+      var y = geom.padTop + m.top + 8 * zoomFactor;
+
+      if (!ph) { ph = document.createElement('div'); ph.className = 'bt-playhead'; }
+      if (ph.parentNode !== container) container.appendChild(ph);
+      if (idx !== lastPhSys) {
+        ph.style.height = ((m.H - 14) * zoomFactor).toFixed(1) + 'px';
+        lastPhSys = idx;
+      }
+      ph.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
       // page-flip when the playhead enters a new row, only while actually playing
-      if (idx !== lastFollowIdx && follow()) { lastFollowIdx = idx; keepRowVisible(m.el); }
+      if (idx !== lastFollowIdx && follow()) { lastFollowIdx = idx; keepRowVisible(m); }
     }
 
     // ---- fingering overrides ----------------------------------------------
@@ -589,6 +686,7 @@ var BassTabView = (function () {
       container.innerHTML = '';
       geom.systems = [];
       lastResult = null; lastSong = null; lastSettings = null;
+      lastTick = null;
     }
 
     // Build a print-ready (light-theme) copy of the current tab for PDF export.

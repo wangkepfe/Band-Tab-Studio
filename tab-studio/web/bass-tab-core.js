@@ -440,11 +440,34 @@
     RHY_VALUES.forEach(function (v) { var dd = Math.abs(qu - v.q); if (dd < bd) { bd = dd; best = v; } });
     return { d: best.d, dotted: best.dotted };
   }
-  // split a silent span (in grid steps) into aligned rest glyphs, bar by bar
+  // split a silent span (in grid steps) into aligned rest glyphs, bar by bar.
+  //
+  // `grid` MUST be the exact (fractional) ticks-per-step, never a rounded one:
+  // `avail` keeps only the values that land on a whole number of steps, and the
+  // test for that is an exact-integer test. Hand it a rounded grid and every ratio
+  // misses by a fraction of a percent, `avail` comes back EMPTY, and every rest
+  // falls through to the 1-step fallback below — a bar of silence drawn as `spb`
+  // separate sixteenth-rests instead of one whole rest.
+  //
+  // The trigger is simply `ticksPerBar / stepsPerBar` not being a whole number; a
+  // tempo mismatch is one way to get there, but plain ppq 220 on any triplet grid
+  // (or 1/32) does it too, so this hit most projects here, not an exotic few. On
+  // seed-private-eyes it turned 244 rest glyphs into 1601 and the tab's SVG from
+  // ~3.9k elements into ~11.4k — wrong on the page, and what buried older iPads.
+  //
+  // It also un-breaks the `guard` below: at one step per rest, a silence longer
+  // than 2000 steps hit the cap and was silently TRUNCATED, desynchronising the
+  // rhythm lane from the staff for the rest of the piece. The longest silence in
+  // the projects here is 1548 steps — one longer intro from that bug.
   function decomposeRest(startCol, steps, grid, ppq, spb) {
+    // Round ONCE and test the rounded value. Testing `st >= 1` on the raw ratio
+    // drops a value whose true length is exactly one step whenever it computes as
+    // 0.9999999999999999 — and then the rest falls through to the fixed sixteenth
+    // below, notating a sixteenth where (say, in 7/8 on a 1/8 grid) an eighth
+    // belongs. Everything downstream wants the integer anyway.
     var avail = RHY_VALUES
-      .map(function (v) { return { v: v, st: v.q * ppq / grid }; })
-      .filter(function (o) { return Math.abs(o.st - Math.round(o.st)) < 1e-6 && o.st >= 1; })
+      .map(function (v) { var st = v.q * ppq / grid; return { v: v, st: st, r: Math.round(st) }; })
+      .filter(function (o) { return Math.abs(o.st - o.r) < 1e-6 && o.r >= 1; })
       .sort(function (a, b) { return b.st - a.st; });
     var out = [], col = startCol, rem = steps, guard = 0;
     while (rem > 0 && guard++ < 2000) {
@@ -452,7 +475,7 @@
       var cap = Math.min(rem, spb - posInBar);
       var pick = null;
       for (var k = 0; k < avail.length; k++) {
-        var st = Math.round(avail[k].st);
+        var st = avail[k].r;
         if (st <= cap && (col % st === 0 || st === 1)) { pick = { d: avail[k].v.d, dotted: avail[k].v.dotted, st: st }; break; }
       }
       if (!pick) pick = { d: 16, dotted: false, st: 1 };
@@ -463,7 +486,12 @@
   }
   // Returns an ordered list of {kind:'note'|'rest', startCol, steps, value:{d,dotted}, noteIdx}
   function buildRhythm(notes, layout, ppq) {
-    var spb = layout.stepsPerBar, grid = Math.round(layout.ticksPerBar / spb);
+    // Exact ticks-per-step, recovered the way the layout actually spaced the
+    // columns. Rounding it was fatal in decomposeRest (see the note there) and
+    // also shifted a few percent of NOTE glyphs — those move too, and toward the
+    // truth: `soundSteps` and `valueOfTicks` now describe the width the staff
+    // really draws, where before they measured against a step size nothing used.
+    var spb = layout.stepsPerBar, grid = layout.ticksPerBar / spb;
     var onsetCols = layout.columns.filter(function (c) { return c.noteIdx.length; });
     var ev = [];
     if (!onsetCols.length) return ev;

@@ -30,6 +30,30 @@ var PianoRoll = (function () {
     var ctx = canvas.getContext('2d');
     var dpr = window.devicePixelRatio || 1;
 
+    // ---- playhead overlay ---------------------------------------------------
+    // A second, transparent canvas stacked exactly over the first, holding nothing
+    // but the play cursor. Without it, advancing the cursor meant a full render():
+    // clear + grid + every visible note + velocity lane + ruler + keyboard +
+    // scrollbars, ~300-400 Canvas2D calls, sixty times a second, to move a 2px
+    // line. Nothing else on screen had changed. Now the base canvas repaints only
+    // when the view really changes (scroll, zoom, edit, selection) and playback
+    // touches this layer alone — and only the narrow band the cursor occupies.
+    //
+    // Safe to draw ON TOP even though render() used to draw the playhead beneath
+    // the ruler/keyboard/scrollbars: drawPlayheadLayer clips itself to the grid
+    // rect (x in [KEYS_W, gridRight()], y in [RULER_H, H-SB]), which is exactly the
+    // region none of that chrome occupies. Same pixels, different layer.
+    var over = document.createElement('canvas');
+    over.style.cssText = 'position:absolute;top:0;left:0;display:block;pointer-events:none';
+    var octx = over.getContext('2d');
+    var ovW = 0, ovH = 0, phLastX = -1;
+    // Start collapsed. A fresh <canvas> defaults to a 300x150 box, and until the
+    // first sync (which cannot happen while the pane is hidden and measures 0)
+    // that phantom box would sit over the top-left corner of the view.
+    over.width = over.height = 0;
+
+    if (canvas.parentNode) canvas.parentNode.insertBefore(over, canvas.nextSibling);
+
     // P.timelineTempo anchors the tick axis to real time: the notes were written at
     // that tempo (the transcription's own), so tick × 60/(timelineTempo × ppq) = the
     // second it sounds in the song. P.tempo is the MUSICAL tempo the user dials in —
@@ -166,12 +190,60 @@ var PianoRoll = (function () {
       drawGrid();
       drawNotes();
       drawVelLane();
-      drawPlayhead();
       drawRuler();
       drawKeyboard();
       drawScrollbars();
       if (drag && drag.mode === 'marquee') drawMarquee();
       ctx.fillStyle = '#0e1117'; ctx.fillRect(0, 0, KEYS_W, RULER_H);   // top-left corner
+      drawPlayheadLayer();     // the cursor lives on the overlay now, but a full
+                               // repaint still has to leave it on screen
+    }
+
+    // Keep the overlay's box and backing store in step with the base canvas.
+    // Assigning width/height also wipes it, so the remembered dirty band is void.
+    function syncOverlay() {
+      if (!over.parentNode && canvas.parentNode) canvas.parentNode.insertBefore(over, canvas.nextSibling);
+      var bw = Math.round(W * dpr), bh = Math.round(H * dpr);
+      if (over.width !== bw || over.height !== bh) {
+        over.width = bw; over.height = bh;
+        phLastX = -1;
+      }
+      if (ovW !== W || ovH !== H) {
+        over.style.width = W + 'px'; over.style.height = H + 'px';
+        ovW = W; ovH = H;
+      }
+      octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    // Repaint ONLY the play cursor. Clears the band the last one occupied rather
+    // than the whole layer: a full-canvas clear is ~16MB of writes at retina scale,
+    // which is exactly the memory bandwidth an older tablet does not have to spare.
+    function drawPlayheadLayer() {
+      if (W <= 0 || H <= 0) return;                 // pane hidden — nothing to draw on
+      syncOverlay();
+      var bot = H - SB;
+      // Band spans the full height because the ruler triangle lives here too, and
+      // is 13px wide to cover that triangle (x-4 .. x+4) plus antialiasing.
+      if (phLastX >= 0) octx.clearRect(phLastX - 6, 0, 13, bot);
+      phLastX = -1;
+      if (playhead < 0) return;
+      var x = tickToX(playhead);
+      if (x < KEYS_W || x > gridRight()) return;
+      var xr = Math.round(x) + 0.5;
+      octx.save();
+      // Clip to the grid column. render() used to draw the cursor BEFORE the
+      // ruler, keyboard and scrollbars, so those overpainted any spill; on a layer
+      // above them nothing does, and a cursor sitting exactly on gridRight() would
+      // otherwise bleed ~1.3px onto the vertical scrollbar track. This clip is the
+      // same x-range drawRuler clips its own contents to.
+      octx.beginPath(); octx.rect(KEYS_W, 0, gridRight() - KEYS_W, bot); octx.clip();
+      octx.strokeStyle = '#ffcf4d'; octx.lineWidth = 1.6;
+      octx.beginPath(); octx.moveTo(xr, RULER_H); octx.lineTo(xr, bot); octx.stroke();
+      octx.fillStyle = '#ffcf4d';
+      octx.beginPath(); octx.moveTo(x, RULER_H); octx.lineTo(x - 4, RULER_H - 7); octx.lineTo(x + 4, RULER_H - 7);
+      octx.closePath(); octx.fill();
+      octx.restore();
+      phLastX = xr;
     }
 
     function drawGrid() {
@@ -179,20 +251,47 @@ var PianoRoll = (function () {
       ctx.beginPath(); ctx.rect(KEYS_W, RULER_H, gridViewW(), gridViewH()); ctx.clip();
       // two tones only: the backdrop IS the black-key colour, white-key rows paint over it
       ctx.fillStyle = '#080b11'; ctx.fillRect(KEYS_W, RULER_H, gridViewW(), gridViewH());
+      // Everything below batches same-styled shapes into ONE path. Canvas2D charges
+      // per submission, not per segment, so a screenful of rows and gridlines used to
+      // cost several hundred beginPath/fill/stroke calls per repaint — paid again on
+      // every drag, scroll and zoom. Same marks, a handful of submissions.
+      //
+      // Two pixels DO change, both for the better: accumulating the white-key rows
+      // into one path sums their coverage instead of compositing each row's
+      // antialiased edge separately, so the faint seam between adjacent white rows
+      // (E|F, B|C) at fractional row heights disappears; and when the zoom is low
+      // enough that a bar line and a neighbouring beat line round to the same x, the
+      // bar now always wins instead of whichever came later in tick order.
+      function strokeVLines(xs, style, width, y0, y1) {
+        if (!xs.length) return;
+        ctx.strokeStyle = style; ctx.lineWidth = width;
+        ctx.beginPath();
+        for (var i = 0; i < xs.length; i++) { ctx.moveTo(xs[i], y0); ctx.lineTo(xs[i], y1); }
+        ctx.stroke();
+      }
+
       // pitch rows
       var pTop = yToPitch(RULER_H), pBot = yToPitch(gridBottom() - 1);
       // white keys lighter, black keys the backdrop — same reading as the gutter
+      var gw = gridViewW();
       ctx.fillStyle = '#0f1621';
+      ctx.beginPath();
       for (var p = pTop; p >= pBot; p--) {
-        if (WHITE[((p % 12) + 12) % 12]) ctx.fillRect(KEYS_W, pitchTopY(p), gridViewW(), view.rowH);
+        if (WHITE[((p % 12) + 12) % 12]) ctx.rect(KEYS_W, pitchTopY(p), gw, view.rowH);
       }
+      ctx.fill();
       // octave dividers on top of the fills: the BOTTOM edge of each C row is the B|C
       // boundary (its top edge would split C from the C# above). Stroking these inside
       // the fill loop would put them under the next row's paint.
       ctx.strokeStyle = '#222c3a'; ctx.lineWidth = 1;
+      ctx.beginPath();
       for (var p2 = pTop; p2 >= pBot; p2--) {
-        if (p2 % 12 === 0) { var yo = Math.round(pitchTopY(p2) + view.rowH) + 0.5; line(KEYS_W, yo, gridRight(), yo); }
+        if (p2 % 12 === 0) {
+          var yo = Math.round(pitchTopY(p2) + view.rowH) + 0.5;
+          ctx.moveTo(KEYS_W, yo); ctx.lineTo(gridRight(), yo);
+        }
       }
+      ctx.stroke();
       // vertical time lines — sub-divisions first, then beats and bars over them.
       // Beats/bars are counted off the bar grid itself, never off the sub-division, so
       // they land right even when the division doesn't divide a bar evenly (1/8T at
@@ -201,19 +300,24 @@ var PianoRoll = (function () {
       var step = stepT(), pxStep = step * ppt;
       var k, t, x;
       if (pxStep >= 7) {                                        // hide sub-beat lines when cramped
-        ctx.strokeStyle = '#171f2a'; ctx.lineWidth = 1;
+        var subs = [];
         for (k = Math.floor((xToTick(KEYS_W) - off) / step), t = off + k * step; t <= last; k++, t = off + k * step) {
           if (t < 0) continue;
-          x = Math.round(tickToX(t)) + 0.5; line(x, RULER_H, x, gridBottom());
+          subs.push(Math.round(tickToX(t)) + 0.5);
         }
+        strokeVLines(subs, '#171f2a', 1, RULER_H, gridBottom());
       }
-      var bt = beatT(), perBar = P.timeSig.num || 4;
+      // A bar tick is always also a beat tick, so the two sets are disjoint in TIME.
+      // They can still collide in rounded x once beats fall below ~1px apart, and
+      // there the bar line now wins rather than whichever came later — see above.
+      var bt = beatT(), perBar = P.timeSig.num || 4, bars = [], beats = [];
       for (k = Math.floor((xToTick(KEYS_W) - off) / bt), t = off + k * bt; t <= last; k++, t = off + k * bt) {
         if (t < 0) continue;
-        var isBar = (k % perBar === 0);
-        ctx.strokeStyle = isBar ? '#3a4658' : '#26303f'; ctx.lineWidth = isBar ? 1.4 : 1;
-        x = Math.round(tickToX(t)) + 0.5; line(x, RULER_H, x, gridBottom());
+        x = Math.round(tickToX(t)) + 0.5;
+        (k % perBar === 0 ? bars : beats).push(x);
       }
+      strokeVLines(beats, '#26303f', 1, RULER_H, gridBottom());
+      strokeVLines(bars, '#3a4658', 1.4, RULER_H, gridBottom());
       ctx.restore();
     }
 
@@ -258,14 +362,8 @@ var PianoRoll = (function () {
       ctx.restore();
     }
 
-    function drawPlayhead() {
-      var x = tickToX(playhead);
-      if (x < KEYS_W || x > gridRight()) return;
-      ctx.strokeStyle = '#ffcf4d'; ctx.lineWidth = 1.6;
-      line(Math.round(x) + 0.5, RULER_H, Math.round(x) + 0.5, H - SB);
-    }
-
     function drawRuler() {
+      ctx.lineWidth = 1;                 // don't inherit it — see drawKeyboard
       ctx.fillStyle = '#11161f'; ctx.fillRect(KEYS_W, 0, W - KEYS_W, RULER_H);
       ctx.strokeStyle = '#2b3340'; line(KEYS_W, RULER_H - 0.5, W, RULER_H - 0.5);
       ctx.save(); ctx.beginPath(); ctx.rect(KEYS_W, 0, gridViewW(), RULER_H); ctx.clip();
@@ -281,13 +379,20 @@ var PianoRoll = (function () {
           var bx = tickToX(bt0 + k * bt); ctx.strokeStyle = '#2b3340'; line(Math.round(bx) + 0.5, RULER_H - 5, Math.round(bx) + 0.5, RULER_H);
         }
       }
-      // playhead tick on ruler
-      var px = tickToX(playhead);
-      if (px >= KEYS_W && px <= gridRight()) { ctx.fillStyle = '#ffcf4d'; ctx.beginPath(); ctx.moveTo(px, RULER_H); ctx.lineTo(px - 4, RULER_H - 7); ctx.lineTo(px + 4, RULER_H - 7); ctx.fill(); }
+      // The ruler's playhead triangle is NOT drawn here any more — it moved to the
+      // overlay with the line it belongs to. Left on the base canvas it froze in
+      // place the moment playback stopped repainting the base, leaving two yellow
+      // markers on screen disagreeing about where the playhead is.
       ctx.restore();
     }
 
     function drawKeyboard() {
+      // Set our own line width instead of inheriting whatever the previous pass
+      // left. It used to inherit 1.6 from drawPlayhead — but only while the cursor
+      // happened to be on screen, so the key separators silently thickened during
+      // playback and thinned again afterwards. The cursor has moved to its own
+      // layer, so nothing sets it here at all any more; pin it.
+      ctx.lineWidth = 1;
       ctx.fillStyle = '#0b0f15'; ctx.fillRect(0, RULER_H, KEYS_W, gridBottom() - RULER_H);
       ctx.save(); ctx.beginPath(); ctx.rect(0, RULER_H, KEYS_W, gridViewH()); ctx.clip();
       var pTop = yToPitch(RULER_H), pBot = yToPitch(gridBottom() - 1);
@@ -570,11 +675,29 @@ var PianoRoll = (function () {
       view.pxPerQuarter = clamp(gridViewW() / quarters, 2, 800); view.scrollX = 0;
       scheduleDraw(); if (opts.onZoom) opts.onZoom();
     }
-    function scrollToTick(t) { view.scrollX = clamp(t * pxPerTick() - gridViewW() * 0.35, 0, maxScrollX()); scheduleDraw(); }
+    // Returns whether the view actually moved. It often doesn't: scrollX is clamped
+    // to [0, maxScrollX], so through the whole opening and closing stretch of a song
+    // the follow test keeps firing while the value never changes. Reporting that
+    // lets setPlayhead skip a full repaint it would otherwise do on every frame.
+    function scrollToTick(t) {
+      var nx = clamp(t * pxPerTick() - gridViewW() * 0.35, 0, maxScrollX());
+      if (nx === view.scrollX) return false;
+      view.scrollX = nx; scheduleDraw(); return true;
+    }
+    // Called once per animation frame during playback. Only when the follow-scroll
+    // actually fires (the cursor reaching ~30px from either edge, a few times a
+    // song) has the grid moved and does the base canvas need repainting;
+    // scrollToTick already queues that. Every other frame nothing but the cursor
+    // moved, so only the overlay is touched — and synchronously, since it is a
+    // couple of Canvas2D calls and going through the rAF queue would just add a
+    // frame of lag to the one element the user is watching.
     function setPlayhead(t) {
       playhead = t;
-      if (opts.follow && opts.follow()) { var x = tickToX(t); if (x < KEYS_W + 30 || x > gridRight() - 30) scrollToTick(t); }
-      scheduleDraw();
+      if (opts.follow && opts.follow()) {
+        var x = tickToX(t);
+        if (x < KEYS_W + 30 || x > gridRight() - 30) { if (scrollToTick(t)) return; }
+      }
+      drawPlayheadLayer();
     }
     function seekTo(t) { playhead = Math.max(0, t); if (opts.onSeek) opts.onSeek(playhead); scheduleDraw(); }
 

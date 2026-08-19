@@ -186,9 +186,19 @@
     // notice channel that refusal is silent and reads as a dead play button.
     onNotice: flash
   });
+  // Called once per animation frame while the transport runs. Every write here is
+  // guarded on the value actually changing: the play glyph flips maybe twice a
+  // song and the clock ticks once a second, but assigning .textContent replaces
+  // the text node either way, and three needless DOM mutations a frame is three
+  // needless style/layout invalidations of a page that can be holding thousands
+  // of tab elements. Cheap to skip, so skip.
+  var lastPlayGlyph = '', lastNow = '', lastTotal = '';
   function onTransport(st) {
-    $('btnPlay').textContent = st.playing ? '⏸' : '▶';
-    $('timeNow').textContent = fmt(st.posSec); $('timeTotal').textContent = fmt(st.durationSec);
+    var glyph = st.playing ? '⏸' : '▶';
+    if (glyph !== lastPlayGlyph) { $('btnPlay').textContent = glyph; lastPlayGlyph = glyph; }
+    var now = fmt(st.posSec), total = fmt(st.durationSec);
+    if (now !== lastNow) { $('timeNow').textContent = now; lastNow = now; }
+    if (total !== lastTotal) { $('timeTotal').textContent = total; lastTotal = total; }
     // The video is rolling, so the "tap ▶ on the video" instruction above has
     // done its job — put the plain title back. (This rides the transport's own
     // update channel rather than YouTubePlayer.setOnState(), which is a single
